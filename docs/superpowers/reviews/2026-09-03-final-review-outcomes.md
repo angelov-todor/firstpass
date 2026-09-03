@@ -71,14 +71,17 @@ slice the prompt looked correct, and in the worktree package's slice the checkou
 
 ## Parked findings
 
-Real, non-blocking, deliberately not fixed. Two are worth knowing before a live run.
+Real, non-blocking, deliberately not fixed at the time. Two are worth knowing before a live run.
+
+Items 2 and 4 were subsequently fixed on the `review-followups` branch and are marked below; the rest
+still stand, as do both open decisions above.
 
 | # | Finding | Why parked |
 |---|---|---|
 | 1 | **Legacy mixed-case store keys stop deduping.** `ParseKey` now folds case but a stored `Review.Key` keeps its original spelling, so a lookup misses a pre-existing mixed-case row and that PR would be re-reviewed and re-commented. | The live `state.db` was checked and holds no PR keys, so there is no impact on this machine. It matters only for a database that acquires rows before another machine upgrades. A rekey-on-read in `recoverInFlight` would settle it. |
-| 2 | **A transient git failure destroys a healthy mirror.** `mirrorUsable` maps any failure of `git config --get remote.origin.url` — including "could not run git at all" — to "not usable", and `Prepare` then removes the mirror. | Rebuildable data only. Distinguishing "exit 1" from "could not run" closes it. |
+| 2 | ~~**A transient git failure destroys a healthy mirror.** `mirrorUsable` maps any failure of `git config --get remote.origin.url` — including "could not run git at all" — to "not usable", and `Prepare` then removes the mirror.~~ | **FIXED** on `review-followups`. `gitExit` now exposes the exit code, so only "git ran and reported no origin" discards the mirror; an inability to run git is returned as an error and the ref is deferred. |
 | 3 | `WatermarkGap` can hold the watermark permanently if the watermark message is *deleted* from the space, and `-backfill` (the printed remedy) is itself a non-advancing case. | Reviews still progress via store dedupe; it is a stuck watermark plus a per-tick warning, not lost work. |
-| 4 | The message-ordering assertion false-positives if the newest message lacks `createTime` (zero time is `Before` everything). | Guarding on `!IsZero()` at both ends would fix it. |
+| 4 | ~~The message-ordering assertion false-positives if the newest message lacks `createTime` (zero time is `Before` everything).~~ | **FIXED** on `review-followups`. The comparison now applies only when both endpoints carry a non-zero `CreateTime`; a genuine oldest-first payload is still refused. |
 | 5 | `gh_timeout: 1m` now interacts with `pending_max_attempts`: a persistently slow `gh` expires a PR terminally after ~20 sweeps, where before it was merely slow. | Accepted trade for having a timeout at all. |
 | 6 | `watch`'s store-release window can collapse to milliseconds, because a sweep may legitimately run `3 × 20m` against a 5-minute interval. | The requirement (release between ticks) is met; the observability goal behind it only partly. |
 | 7 | `interval` is the one config field `watch` does not hot-reload — the ticker is built once. | Inconsistent rather than wrong. |

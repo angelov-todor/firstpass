@@ -136,26 +136,48 @@ func (m *Manager) Prepare(ctx context.Context, ref prref.PRRef) (string, func(),
 // mirrorUsable reports whether the mirror on disk can be fetched into. Both a
 // HEAD file and a configured origin are required: either alone is a partial
 // clone left by a killed run.
+//
+// "git ran and reported the key is absent" and "git could not be run at all"
+// must not be conflated. Only the first says anything about the mirror; the
+// second is an AV hold, a transient EPERM or a PATH blip, and treating it as
+// "not usable" made Prepare delete a possibly multi-gigabyte cache and then
+// fail the re-clone for the very same reason. An error here defers the ref for
+// a later sweep instead, which costs nothing but a retry.
 func (m *Manager) mirrorUsable(ctx context.Context, mirror string) (bool, error) {
 	if _, err := os.Stat(filepath.Join(mirror, "HEAD")); os.IsNotExist(err) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
-	if err := m.git0(ctx, "-C", mirror, "config", "--get", "remote.origin.url"); err != nil {
-		return false, nil
+	code, _, err := m.gitExit(ctx, "-C", mirror, "config", "--get", "remote.origin.url")
+	if err != nil {
+		return false, fmt.Errorf("check mirror %s: %w", mirror, err)
 	}
-	return true, nil
+	// `git config --get` exits 1 when the key is not set, and non-zero for
+	// every other way of not having a single usable origin (not a repository,
+	// unreadable config). All of those are the partial-clone signal.
+	return code == 0, nil
 }
 
-func (m *Manager) git0(ctx context.Context, args ...string) error {
+// gitExit runs git and reports its exit code. The error is reserved for git
+// not having run at all, which is why mirrorUsable can tell the two apart.
+func (m *Manager) gitExit(ctx context.Context, args ...string) (int, []byte, error) {
 	res, err := m.r.Run(ctx, "", m.git, append(nonInteractive(), args...)...)
+	if err != nil {
+		return 0, res.Stderr, err
+	}
+	return res.ExitCode, res.Stderr, nil
+}
+
+// git0 runs git and treats any non-zero exit as a failure.
+func (m *Manager) git0(ctx context.Context, args ...string) error {
+	code, stderr, err := m.gitExit(ctx, args...)
 	if err != nil {
 		return err
 	}
-	if res.ExitCode != 0 {
+	if code != 0 {
 		return fmt.Errorf("git %s exit %d: %s",
-			strings.Join(args, " "), res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+			strings.Join(args, " "), code, strings.TrimSpace(string(stderr)))
 	}
 	return nil
 }
