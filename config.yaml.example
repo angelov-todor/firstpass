@@ -7,6 +7,10 @@
 #
 # A field left out of this file simply keeps its default. You do not need to
 # copy every line below; this file documents all of them for reference.
+#
+# Leaving a field out is not the same as giving it an empty value: `key: ""`
+# and `key: []` override the default with that empty value rather than falling
+# back to it. Comment the key out instead.
 
 # ---------------------------------------------------------------------------
 # REQUIRED — no default. firstpass will refuse to run until these are set.
@@ -128,8 +132,12 @@ claude_args:
 
 # Where firstpass keeps its database, bare mirrors, worktrees and reports.
 # Must be an absolute path.
+#
+# Left out (as below), it defaults to %LOCALAPPDATA%\firstpass. Do not write
+# `state_dir: ""`: an explicit empty string overrides the default rather than
+# falling back to it, and firstpass would refuse to start.
 # Default: %LOCALAPPDATA%\firstpass
-state_dir: ""
+# state_dir: C:\Users\you\AppData\Local\firstpass
 
 paths:
   # Path to the chat-reading script described in the REQUIRED section above.
