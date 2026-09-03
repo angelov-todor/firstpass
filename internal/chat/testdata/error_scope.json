@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 403,
+    "message": "Request had insufficient authentication scopes. ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+    "status": "PERMISSION_DENIED"
+  }
+}

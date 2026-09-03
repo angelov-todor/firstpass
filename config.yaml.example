@@ -1,0 +1,148 @@
+# firstpass configuration.
+#
+# Copy this file to %APPDATA%\firstpass\config.yaml and fill in the fields
+# marked REQUIRED below. Every field has a safe default except those four —
+# config.Default() leaves them empty on purpose, so a fresh install cannot
+# act on anything until it has been deliberately configured.
+#
+# A field left out of this file simply keeps its default. You do not need to
+# copy every line below; this file documents all of them for reference.
+
+# ---------------------------------------------------------------------------
+# REQUIRED — no default. firstpass will refuse to run until these are set.
+# ---------------------------------------------------------------------------
+
+# The Google Chat space to watch, in "spaces/<id>" form. Find it with the
+# chat script's list-spaces command, or from the space's URL.
+# REQUIRED — no default.
+space: ""
+
+# Your own GitHub login, exactly as it appears on your PRs. Without this,
+# firstpass cannot tell your own pull requests apart from a colleague's and
+# would review — and comment on — your own work.
+# REQUIRED — no default.
+github_login: ""
+
+# The GitHub organisations (or users) firstpass is allowed to touch. This is
+# the blast-radius control: a PR link to any owner not on this list is
+# recorded and skipped, never cloned, never queried. The chat space is a
+# chat room, not an access boundary — someone will eventually paste a link
+# to an unrelated repository, and without this list firstpass would clone it
+# and post comments on it.
+# REQUIRED — no default. Comparison is case-insensitive.
+allow_owners: []
+# allow_owners:
+#   - your-org
+
+# Path to a script that can read the configured Google Chat space and print
+# messages as JSON on stdout (see internal/chat for the expected shape).
+# firstpass does not talk to the Chat API directly — it drives this script
+# as a subprocess, the way it drives `git` and `gh`. No such script ships
+# with this repository; you must supply or write your own.
+# REQUIRED — no default. It lives in the `paths:` block at the bottom of this
+# file, together with the other executable paths.
+
+# ---------------------------------------------------------------------------
+# Safety — read this before changing it
+# ---------------------------------------------------------------------------
+
+# dry_run defaults to true. In dry-run mode firstpass runs the full pipeline
+# — including the checkout and the Claude review — but writes findings to a
+# report file under the state directory instead of posting them to GitHub.
+# Setting this to false (or passing -live to `scan`/`replay`, or running
+# `watch` without dry_run: true) means REAL comments get posted to REAL pull
+# requests, under your GitHub identity. Do this only after reading a dry-run
+# report and confirming you'd be comfortable posting it.
+dry_run: true
+
+# ---------------------------------------------------------------------------
+# Everything else — safe defaults, override only if you need to
+# ---------------------------------------------------------------------------
+
+# How often `watch` sweeps the chat space for new PR links.
+# Default: 5m
+interval: 5m
+
+# Maximum reviews run in a single sweep, so a burst of posted PRs cannot
+# start an unbounded pile of concurrent `claude` processes.
+# Default: 3
+max_reviews_per_sweep: 3
+
+# How long a single review may run before it is treated as needs_attention
+# (never retried automatically — a timeout may have fired mid-post).
+# Default: 20m
+review_timeout: 20m
+
+# Timeout for the chat-reading subprocess.
+# Default: 2m
+chat_timeout: 2m
+
+# Timeout for each `gh` invocation.
+# Default: 1m
+gh_timeout: 1m
+
+# Timeout for cloning/fetching a repository's bare mirror. On Windows an
+# HTTPS clone of a private repo can raise a Git Credential Manager prompt;
+# this bounds how long an unattended daemon waits for a human who isn't
+# there.
+# Default: 15m
+clone_timeout: 15m
+
+# How many times a deferred PR (e.g. still a draft) is re-checked before it
+# is given up on and recorded as expired.
+# Default: 20
+pending_max_attempts: 20
+
+# How long a deferred PR is re-checked before it is given up on and recorded
+# as expired, regardless of attempt count.
+# Default: 168h (7 days)
+pending_max_age: 168h
+
+# How many chat messages are requested per sweep.
+# Default: 50
+fetch_limit: 50
+
+# Specific owner/repo pairs to carve out of an otherwise allowed owner.
+# Never acted on directly by firstpass; recorded terminal like any other
+# disallowed PR.
+# Default: []
+deny_repos: []
+# deny_repos:
+#   - your-org/some-repo
+
+# Arguments passed to `claude -p` for every review. The shipped default,
+# --permission-mode bypassPermissions, is required for a headless review to
+# run `gh` and post comments at all — under the default permission mode
+# claude would block on a prompt nobody can answer.
+#
+# THIS IS NOT A SANDBOX. The review subprocess inherits your full
+# environment: it can reach anything you can reach, including repositories
+# outside allow_owners, and the checkout it runs in is the pull request
+# author's code, which may carry its own CLAUDE.md or .claude/ config. Read
+# the Safety section of README.md and the linked design-decision doc before
+# relying on this default.
+# Default: ["--permission-mode", "bypassPermissions"]
+claude_args:
+  - --permission-mode
+  - bypassPermissions
+
+# Where firstpass keeps its database, bare mirrors, worktrees and reports.
+# Must be an absolute path.
+# Default: %LOCALAPPDATA%\firstpass
+state_dir: ""
+
+paths:
+  # Path to the chat-reading script described in the REQUIRED section above.
+  # REQUIRED — no default.
+  chat_script: ""
+
+  # "python", not "python3" — on some systems the python3 available on PATH
+  # cannot import the `keyring` module a chat script is likely to need.
+  # Default: python
+  python: python
+
+  # claude, git and gh are expected on PATH by default; override only if
+  # they are not, or you want to pin a specific binary.
+  claude: claude
+  git: git
+  gh: gh

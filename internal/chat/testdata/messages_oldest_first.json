@@ -1,0 +1,19 @@
+{
+  "messages": [
+    {
+      "name": "spaces/A/messages/m1",
+      "text": "standup in 5",
+      "createTime": "2026-09-03T07:00:00Z"
+    },
+    {
+      "name": "spaces/A/messages/m2",
+      "text": "Example-Org/aex-history-service#48 is ready",
+      "createTime": "2026-09-03T08:00:00Z"
+    },
+    {
+      "name": "spaces/A/messages/m3",
+      "text": "https://github.com/Example-Org/aex-balances/pull/12",
+      "createTime": "2026-09-03T09:00:00Z"
+    }
+  ]
+}

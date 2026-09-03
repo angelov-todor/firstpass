@@ -1,0 +1,16 @@
+Access token expired, refreshing...
+Token refreshed successfully.
+[
+  {
+    "name": "spaces/AAQA7i0wfSk",
+    "type": "ROOM",
+    "displayName": "astraex-dev-alerts",
+    "spaceType": "SPACE",
+    "createTime": "2025-11-13T12:41:21.417916Z"
+  },
+  {
+    "name": "spaces/AAQALFUZPBA",
+    "type": "ROOM",
+    "spaceThreadingState": "THREADED_MESSAGES"
+  }
+]

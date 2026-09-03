@@ -1,0 +1,6 @@
+/firstpass
+*.exe
+/dist/
+*.db
+/reports/
+.superpowers/
