@@ -114,7 +114,14 @@ func (s *Store) Review(key string) (Review, bool, error) {
 
 func (s *Store) PutReview(r Review) error { return s.put(bucketReviews, []byte(r.Key), r) }
 
-// DeleteReview clears a terminal record so replay can review the PR again.
+// DeleteReview removes a record entirely, forgetting that firstpass ever
+// decided anything about the pull request.
+//
+// Nothing in the pipeline calls this. `firstpass replay` used to, and the
+// deletion is exactly why a replay that then failed left the PR with no record
+// at all, so the next sweep reviewed it again; replay now ignores the record
+// in place instead. Anything reaching for this should be sure it wants the
+// dedupe evidence gone rather than overwritten.
 func (s *Store) DeleteReview(key string) error { return s.del(bucketReviews, key) }
 
 func (s *Store) Reviews() ([]Review, error) {
