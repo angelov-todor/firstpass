@@ -21,6 +21,24 @@ type check struct {
 	detail string
 }
 
+const (
+	// doctorCheckTimeout bounds one external dependency, not the whole
+	// command, so a slow one cannot mask the others.
+	doctorCheckTimeout = 20 * time.Second
+	// doctorOverallTimeout keeps the command itself bounded: four sequential
+	// checks at doctorCheckTimeout each fit inside it with room to spare, and
+	// nothing can run longer than this in total.
+	doctorOverallTimeout = 2 * time.Minute
+)
+
+// withCheckTimeout runs one doctor check under its own deadline, derived from
+// the command's overall deadline so both bounds apply and the shorter wins.
+func withCheckTimeout(parent context.Context, d time.Duration, fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(parent, d)
+	defer cancel()
+	return fn(ctx)
+}
+
 func cmdDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	cfgPath := fs.String("config", config.DefaultConfigPath(), "config file")
@@ -28,8 +46,13 @@ func cmdDoctor(args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	// One deadline per check, not one for the command. Shared, a slow `gh auth
+	// status` could consume the whole budget and the Google Chat check — the
+	// one fatalChatBanner explicitly sends the operator to run — would fail on
+	// a timeout rather than on its own merits, sending them to
+	// re-authenticate the wrong thing entirely.
+	overall, cancelAll := context.WithTimeout(context.Background(), doctorOverallTimeout)
+	defer cancelAll()
 
 	var checks []check
 	add := func(name string, err error, detail string) {
@@ -48,12 +71,26 @@ func cmdDoctor(args []string) error {
 		add("chat.py present", exists(cfg.Paths.ChatScript), cfg.Paths.ChatScript)
 
 		r := runner.OS{}
-		add("git works", version(ctx, r, cfg.Paths.Git, "--version"), cfg.Paths.Git)
-		add("claude works", version(ctx, r, cfg.Paths.Claude, "--version"), cfg.Paths.Claude)
-		add("gh authenticated", ghAuth(ctx, r, cfg.Paths.GH), cfg.Paths.GH)
+		bounded := func(fn func(context.Context) error) error {
+			return withCheckTimeout(overall, doctorCheckTimeout, fn)
+		}
+		add("git works", bounded(func(ctx context.Context) error {
+			return version(ctx, r, cfg.Paths.Git, "--version")
+		}), cfg.Paths.Git)
+		add("claude works", bounded(func(ctx context.Context) error {
+			return version(ctx, r, cfg.Paths.Claude, "--version")
+		}), cfg.Paths.Claude)
+		add("gh authenticated", bounded(func(ctx context.Context) error {
+			return ghAuth(ctx, r, cfg.Paths.GH)
+		}), cfg.Paths.GH)
 
 		ch := chat.New(r, cfg.Paths.Python, cfg.Paths.ChatScript, cfg.Space)
-		named, nerr := ch.HasNamedRooms(ctx)
+		var named bool
+		nerr := bounded(func(ctx context.Context) error {
+			var err error
+			named, err = ch.HasNamedRooms(ctx)
+			return err
+		})
 		switch {
 		case nerr != nil:
 			add("google chat reachable", nerr, "")
