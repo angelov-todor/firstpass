@@ -19,13 +19,17 @@ In scope:
 - Poll the `[AstraEx] Team` space for newly posted GitHub PR links.
 - Review each qualifying PR once, in an isolated checkout.
 - Post findings as inline comments on the PR, under the user's own GitHub identity.
+- Submit an explicit review verdict on every successfully reviewed PR, so a clean one is never
+  silent: an approval when nothing needs changing, a comment review when something does.
 
 Out of scope:
 
 - Any chat platform other than Google Chat; any forge other than GitHub.
 - Re-reviewing on subsequent pushes. The team re-posts a PR whose approval lapsed, so the re-post
   is the re-trigger.
-- Replying to review threads, resolving them, or approving / requesting changes on the PR.
+- Replying to review threads or resolving them. Requesting changes is out of scope too, and
+  deliberately so: see the verdict asymmetry above. Approving is in scope, but only for a PR the
+  reviewer raised nothing about.
 - Running on a server, or for anyone but this user.
 
 ## Decisions and their reasons
@@ -39,6 +43,9 @@ Out of scope:
 | Scope | Every posted PR except ones the user authored | Matches how the space is used. `github_login: angelov-todor`. |
 | Dedupe | Once per PR identity | The team re-posts when an approval lapses, so re-posting is the intended re-trigger. |
 | Output | Inline GitHub PR comments | The user's explicit choice, made against a recommendation of local-only. Mitigated by a dry-run default, not by narrowing the choice. |
+| Verdict | An explicit GitHub review on every successfully reviewed PR, decided by the reviewer in one `FIRSTPASS-VERDICT:` line and submitted by firstpass | `/code-review --comment` posts findings and nothing else, so a clean PR produced complete silence — indistinguishable from the tool never having run. It happened for real on a +9/−0 one-file PR. The reviewer decides because firstpass never sees a finding; firstpass submits because that makes the action recorded in the store, visible in `status`, and testable against `runner.Fake` rather than buried in a prompt. |
+| Verdict asymmetry | `approve` for nothing-needing-change; a **COMMENT** review, never request-changes, for anything Critical or Important | An approval clears `reviewDecision`, which takes the PR out of the team's human review queue — acceptable only when there is nothing to change. A comment leaves `reviewDecision` at `REVIEW_REQUIRED`, so a PR with findings stays in the queue and a human still looks. request-changes was rejected outright: it would block a merge and speak for a human who has not read the code yet. |
+| Verdict on a failure | Nothing submitted | A failed, killed or timed-out review may have posted a partial comment set and reached no conclusion; a verdict on top of that would state one it never reached. Those stay `needs_attention`. A verdict submission that *itself* fails is the opposite case — the review completed and its comments are all posted — so it stays `reviewed`, with the error in `Detail` and no automatic retry. |
 | Topology | One long-running process, serial review worker | The work is genuinely serial, and concurrent `claude` processes on a laptop are undesirable. The `scan` subcommand makes Task Scheduler operation available without further work. |
 
 ### Risk accepted deliberately
@@ -67,7 +74,7 @@ Single Go module, one binary:
 |---|---|---|
 | `internal/chat` | Read the space | `Fetch(ctx, Watermark) ([]Message, error)` |
 | `internal/prref` | Extract PR refs from message text | `Extract(text string) []PRRef` — pure |
-| `internal/ghpr` | Query PR metadata | `Inspect(ctx, PRRef) (PRInfo, error)` |
+| `internal/ghpr` | Query PR metadata; submit the verdict | `Inspect(ctx, PRRef) (PRInfo, error)`, `SubmitReview(ctx, PRRef, verdict, body) error` |
 | `internal/store` | Persist watermark and outcomes | `Reviewed`, `Record`, `Pending`, watermark get / set |
 | `internal/worktree` | Provide code on disk | `Prepare(ctx, PRRef, sha) (dir, cleanup, error)` |
 | `internal/review` | Run the reviewer | `Run(ctx, dir, PRRef) (Result, error)` |
@@ -91,9 +98,18 @@ interface with a fake, so `pipeline` tests run without subprocesses.
 6. `worktree.Prepare` maintains a bare mirror at
    `%LOCALAPPDATA%\firstpass\repos\<owner>_<repo>.git`, fetches `refs/pull/<n>/head`, and adds a
    worktree at `%LOCALAPPDATA%\firstpass\work\<owner>_<repo>_<n>`.
-7. `review.Run` executes `claude -p "/code-review --comment"` with cwd set to the worktree.
-8. `store.Record` writes the outcome, then the worktree is removed.
-9. The watermark advances only after the entire batch is recorded.
+7. `review.Run` executes `claude -p "/code-review --comment"` with cwd set to the worktree. The
+   prompt also asks the reviewer to finish by printing one machine-readable line,
+   `FIRSTPASS-VERDICT: approve` or `FIRSTPASS-VERDICT: findings`, which `review` parses out of
+   stdout. firstpass never sees a finding — `/code-review` posts them itself — so this line is the
+   only channel between what the reviewer concluded and what firstpass can act on.
+8. After a review that succeeded, `ghpr.SubmitReview` submits that verdict as a GitHub review:
+   `gh pr review <n> --repo <owner>/<repo> --approve` for `approve`, `--comment` for `findings`. A
+   dry run submits nothing and says in its report what the verdict would have been. A failed,
+   killed or timed-out review submits nothing at all. A missing or unrecognised verdict line
+   submits nothing and is recorded as `reviewed` with the verdict `unknown`; it is never guessed.
+9. `store.Record` writes the outcome and the submitted verdict, then the worktree is removed.
+10. The watermark advances only after the entire batch is recorded.
 
 ## State
 
@@ -102,7 +118,7 @@ interface with a fake, so `pipeline` tests run without subprocesses.
 - `meta` — `watermark` -> `{messageName, createTime}`. The key is the message **name**
   (`spaces/.../messages/...`), which is stable and unique. `createTime` has ties and clock skew, so
   it serves only as a coarse pagination bound.
-- `reviews` — `owner/repo#n` -> outcome, head SHA, triggering message, duration, exit code, report
+- `reviews` — `owner/repo#n` -> outcome, submitted verdict, head SHA, triggering message, duration, exit code, report
   path.
 - `pending` — `owner/repo#n` -> `{firstSeen, attempts, lastAttempt, lastReason}`.
 

@@ -18,9 +18,20 @@ One sweep, on a ticker or on demand:
    drafts, and anything already reviewed.
 4. For each survivor, prepare a throwaway git worktree against a local bare
    mirror of the repository.
-5. Run `claude -p "/code-review <pr-url>"` in that worktree.
+5. Run `claude -p "/code-review <pr-url>"` in that worktree, asking the
+   reviewer to finish by printing one machine-readable verdict line.
 6. In dry run (the default), the findings are written to a report file. Live,
    `/code-review` posts them as inline comments on the PR.
+7. Submit that verdict as a GitHub review, so a reviewed PR is never silent —
+   a clean one used to produce nothing at all, indistinguishable from the tool
+   never having run. Nothing needing change (no findings, or only minor nits)
+   is an **approval**, posted under your own GitHub identity. Anything
+   Critical or Important is a **comment** review, deliberately not
+   request-changes: a comment leaves `reviewDecision` at `REVIEW_REQUIRED`, so
+   the PR stays in the team's human review queue, whereas an approval would
+   take it out. Every verdict body says in its first sentence that it is
+   machine-written. A dry run submits nothing and its report says what the
+   verdict would have been.
 
 Decisions and outcomes are recorded in a local `bbolt` database, so restarts
 and crashes never cause a PR to be reviewed twice.
@@ -76,6 +87,19 @@ Read this before running anything other than `doctor` or `scan -print-only`.
 - **`dry_run: true` is the default.** Passing `-live`, or setting
   `dry_run: false` in the config, is what makes firstpass post real comments
   to real pull requests, under your GitHub identity.
+- **A clean PR is approved under your own GitHub identity.** Live, a
+  successful review always ends in a submitted GitHub review: an approval when
+  the reviewer raised nothing or only nits, a comment review when it raised
+  anything Critical or Important. Your colleagues see both as *you*, which is
+  why every body opens by saying it is machine-written and links this
+  repository. A findings verdict is never request-changes, so a machine never
+  blocks a merge on its own — but an approval does clear `reviewDecision`, and
+  that is a real approval on someone else's work. Nothing is submitted unless
+  the review itself succeeded and the reviewer printed a verdict line
+  firstpass recognises: a missing or unrecognised line submits nothing and is
+  recorded as `reviewed / verdict unknown`, never guessed into an approval. A
+  submission that fails leaves the review recorded as `reviewed` with the
+  error visible in `firstpass status`, and is not retried.
 - **`allow_owners` is the blast-radius control, and it has no default.** A
   Google Chat space is a chat room, not an access boundary — someone will
   eventually paste a link to a repository you don't intend firstpass to
@@ -98,4 +122,7 @@ Read this before running anything other than `doctor` or `scan -print-only`.
   run — nothing has ever been posted to a pull request by this tool. Read
   your own dry-run report (`scan -backfill N`, or `replay <url>`, without
   `-live`) and satisfy yourself you would be happy for it to appear on a
-  colleague's PR before ever setting `dry_run: false`.
+  colleague's PR before ever setting `dry_run: false`. No review verdict has
+  ever been submitted either: the report's "the verdict would have been" line
+  is there so you can watch firstpass decide, over several dry runs, before it
+  decides for real.
