@@ -76,8 +76,9 @@ Single Go module, one binary:
 - `scan` — one sweep, then exit. This is also the Task Scheduler entry point. Flags
   `--print-only`, `--backfill N`.
 - `status` — print the review table.
-- `replay <pr-url>` — force one PR, ignoring dedupe but still telling the reviewer that an earlier pass has been here. Respects `dry_run` unless `--live` is passed,
-  so replaying to inspect output cannot post by accident.
+- `replay <pr-url>` — force one PR, ignoring dedupe but still telling the reviewer that an
+  earlier pass has been here. Respects `dry_run` unless `--live` is passed, so replaying to
+  inspect output cannot post by accident.
 - `doctor` — preflight every external dependency.
 - `pause` / `resume` — write and remove the kill-switch file.
 
