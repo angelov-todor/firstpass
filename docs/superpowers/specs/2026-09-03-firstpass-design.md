@@ -76,7 +76,7 @@ Single Go module, one binary:
 - `scan` — one sweep, then exit. This is also the Task Scheduler entry point. Flags
   `--print-only`, `--backfill N`.
 - `status` — print the review table.
-- `replay <pr-url>` — force one PR, ignoring dedupe. Respects `dry_run` unless `--live` is passed,
+- `replay <pr-url>` — force one PR, ignoring dedupe but still telling the reviewer that an earlier pass has been here. Respects `dry_run` unless `--live` is passed,
   so replaying to inspect output cannot post by accident.
 - `doctor` — preflight every external dependency.
 - `pause` / `resume` — write and remove the kill-switch file.
@@ -119,6 +119,17 @@ interface with a fake, so `pipeline` tests run without subprocesses.
    `reviewed` record and the verdict on it, rather than having them overwritten with
    `skipped_state`. The cost of the whole feature is this one `gh pr view` per re-post that turns
    out to have nothing new in it.
+
+   The gates *below* the fall-through were written without an existing review record in mind, and
+   three of them record a terminal outcome: the state gate, the author gate, and pending expiry.
+   For a candidate that fell through as a re-post, all three skip without rewriting the record.
+   Skipping is right; overwriting is not — the reviewed commit, the submitted verdict and the pass
+   count are the only evidence of what firstpass did under the operator's own identity, and a merge
+   or a `github_login` change is not a firstpass decision at all. The pending entry is still
+   cleared: housekeeping, not history. The owner allowlist and the deny list sit *above* the record
+   gate and still record their refusal unconditionally, because that refusal *is* firstpass's own
+   decision. A replay is unconditional too: it is an explicit question, so its fresh decision is
+   the answer the operator asked for.
 6. `worktree.Prepare` maintains a bare mirror at
    `%LOCALAPPDATA%\firstpass\repos\<owner>_<repo>.git`, fetches `refs/pull/<n>/head`, and adds a
    worktree at `%LOCALAPPDATA%\firstpass\work\<owner>_<repo>_<n>`.
@@ -131,7 +142,19 @@ interface with a fake, so `pipeline` tests run without subprocesses.
    request at a named commit and posted its findings as inline comments, asking the reviewer to
    concentrate on what has changed and not to restate that pass's findings — without it a second
    pass repeats every unfixed finding on the same lines. The `-p` value is byte-identical across
-   passes. The instruction is a system prompt, not part of the `-p` value: everything after `/code-review`
+   passes.
+
+   A `replay` sends that note too, which is why `ReviewOne` reads the review record before
+   `opts.replay` makes the pipeline ignore it — read, not obeyed. The documented use of `replay` is
+   a `needs_attention` pull request, whose review died part-way through posting, so its note is
+   worded differently: it says the earlier pass did not finish, that nothing knows how far it got,
+   and asks the reviewer to check the pull request before posting a comment and to raise anything
+   that is not already there. Claiming that pass "posted its findings" would be wrong in both
+   directions — inviting a duplicate of the comments that did land and silence about the ones that
+   never did. The recorded head SHA is the evidence that a pass happened at all, so a skipped or
+   expired row yields no note.
+
+   The instruction is a system prompt, not part of the `-p` value: everything after `/code-review`
    there becomes the slash command's `$ARGUMENTS`, which parses an effort level, a `--comment`
    flag and a target, so prose appended to it would at best be dropped and at worst perturb the
    target.
@@ -183,7 +206,7 @@ set.
 
 | Class | Outcomes | Behaviour |
 |---|---|---|
-| Terminal | reviewed, author-is-user, merged, closed, owner not allowed, repo denylisted | Stored in `reviews`. Never revisited, with one exception: a `reviewed` record is superseded by a second pass when the PR is re-posted by a different message and has new commits. |
+| Terminal | reviewed, author-is-user, merged, closed, owner not allowed, repo denylisted | Stored in `reviews`. Never revisited, with one exception: a `reviewed` record is superseded by a second pass when the PR is re-posted by a different message and has new commits. A re-post that then skips at a gate below the record gate — merged, closed, drafted, reassigned, backlog expired — leaves the `reviewed` record standing rather than overwriting it with the skip. |
 | Deferred | draft, `gh` / network failure, `worktree` failure — all of which occur before `claude` starts | Stored in `pending`. Re-inspected every sweep, independent of the watermark. Retried with backoff. |
 | Needs attention | review timeout, `claude` crash, any failure after `claude` started | Stored in `reviews` as `needs_attention`. No automatic retry, ever. |
 

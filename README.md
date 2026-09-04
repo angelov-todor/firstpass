@@ -82,8 +82,26 @@ pass it was. A dry run's report for a later pass is written to
 the previous pass left behind: reading both is how you see what the new
 commits changed.
 
-`firstpass replay` is unaffected. It ignores the record entirely, which is the
-whole point of it, so none of the three conditions applies.
+Re-posted with no new commits, a merged, closed, drafted or reassigned pull
+request keeps the record of the pass that reviewed it. Skipping is still right
+— a merged PR must not be reviewed — but the reviewed commit, the submitted
+verdict and the pass count are the only evidence of what firstpass did here,
+and none of it is recoverable from anywhere else, so a skip does not overwrite
+them. `firstpass status` therefore still shows such a PR as `reviewed`, not
+`skipped_state`. Only the backlog entry is cleared.
+
+`firstpass replay` still ignores the record when deciding whether to review —
+that is the whole point of it, and none of the three conditions applies — but
+it now **reads** the record first, so the reviewer is told that a pass has
+already been here. That matters most for the case replay is documented for: a
+`needs_attention` PR is one whose review died part-way through posting, and a
+reviewer told nothing about that will restate every finding on the lines that
+may already carry them. For such a record the reviewer is told plainly that
+the earlier pass did not finish, that nothing knows how far it got, and to
+check the pull request before posting a comment. A replay of a PR firstpass
+has never reviewed is a first pass and says nothing. Unlike a re-post, a
+replay that ends in a skip does record its own fresh decision: the operator
+asked what firstpass makes of the PR now, and that is the answer.
 
 ## Chat reactions
 
@@ -190,7 +208,8 @@ configured Google Chat account can actually see named spaces).
 - `status` — print the review table: what's been reviewed, skipped, or
   deferred.
 - `replay <pr-url | owner/repo#n>` — force one PR through review again,
-  ignoring the dedupe record. Flags: `-live`, `-quiet`.
+  ignoring the dedupe record but telling the reviewer that an earlier pass has
+  already been here. Flags: `-live`, `-quiet`.
 - `doctor` — preflight every external dependency.
 - `pause` / `resume` — write / remove a kill-switch file. While paused,
   sweeps still queue new PRs but run no reviews and post nothing.
