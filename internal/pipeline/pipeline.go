@@ -81,19 +81,33 @@ const (
 		"firstpass ran a Claude Code review over this pull request and raised nothing " +
 		"needing a change.\n\n" + firstpassURL
 
+	// "posted as inline comments on this pull request", not "on this review":
+	// /code-review posts each inline comment as its own review event, so the
+	// comments do not hang off this review at all. Saying they did would be
+	// false to any colleague who went looking for them here.
 	verdictBodyFindings = "Automated first pass by firstpass — findings posted inline. " +
 		"This is machine-written and is not a substitute for human review.\n\n" +
-		"The findings are inline comments on this review. This is deliberately a comment " +
-		"rather than a request for changes, so the pull request stays in the team's human " +
-		"review queue.\n\n" + firstpassURL
+		"The findings are posted as inline comments on this pull request. This is deliberately " +
+		"a comment rather than a request for changes, so the pull request stays in the team's " +
+		"human review queue.\n\n" + firstpassURL
 )
 
 // noVerdictDetail is recorded when a review finished but printed no verdict
 // line firstpass recognises. Nothing is submitted and nothing is guessed: an
 // approval nobody chose is the one outcome this feature exists to prevent.
-const noVerdictDetail = "the review finished and its comments are posted, but it printed no " +
-	review.VerdictMarker + " line firstpass recognises, so no verdict was submitted and " +
-	"none was guessed"
+//
+// It is dry-run aware for the same reason the killed-review detail is (see
+// handle): a dry run withholds --comment and therefore cannot have posted
+// anything, and a detail that says otherwise sends the operator looking for
+// damage that cannot exist. `firstpass status` shows this string verbatim.
+func noVerdictDetail(dryRun bool) string {
+	const tail = "printed no " + review.VerdictMarker + " line firstpass recognises, so no " +
+		"verdict was submitted and none was guessed"
+	if dryRun {
+		return "the review finished, and this was a dry run so nothing was posted; it " + tail
+	}
+	return "the review finished and its comments are posted, but it " + tail
+}
 
 // inFlightDetail is the human-facing note stored on a recovered record.
 func inFlightDetail(ref prref.PRRef) string {
@@ -796,8 +810,18 @@ func (p *Pipeline) submitVerdict(ctx context.Context, rec *store.Review, ref prr
 		event, body, submitted = ghpr.ReviewComment, verdictBodyFindings, store.VerdictFindings
 	default:
 		p.Log.Warn("no verdict", "key", ref.Key(), "verdict", string(v))
+		// Recorded as unknown in both modes, unlike the dry-run branch below
+		// which leaves the verdict unset. The two mean different things and
+		// the distinction is what the operator is watching during the dry-run
+		// phase: unknown says the reviewer produced no verdict at all, so
+		// there was never anything to submit and a live run would have
+		// submitted nothing either; unset says there was a verdict and
+		// firstpass did not submit it (a dry run, or a submission that
+		// failed). Neither is ever a positive value, which is the invariant
+		// that matters: store.Verdict only ever holds approved or findings
+		// when a submission actually succeeded.
 		rec.Verdict = store.VerdictUnknown
-		rec.Detail = noVerdictDetail
+		rec.Detail = noVerdictDetail(p.Cfg.DryRun)
 		return
 	}
 

@@ -161,6 +161,18 @@ func TestVerdictBodiesSayTheyAreMachineWritten(t *testing.T) {
 	}
 }
 
+// /code-review posts each inline comment as its own review event, so the
+// findings do not hang off the verdict review. Saying they did would send a
+// colleague looking for comments that are not there.
+func TestTheFindingsBodyDoesNotClaimTheCommentsAreOnThisReview(t *testing.T) {
+	if strings.Contains(verdictBodyFindings, "on this review") {
+		t.Errorf("the findings are not comments on this review: %q", verdictBodyFindings)
+	}
+	if !strings.Contains(verdictBodyFindings, "inline comments on this pull request") {
+		t.Errorf("the body must say where the findings actually are: %q", verdictBodyFindings)
+	}
+}
+
 // A dry run posts no comments and must submit no verdict either. The record
 // says what it would have been, so the operator can watch it decide before it
 // decides for real.
@@ -191,6 +203,56 @@ func TestDryRunSubmitsNoVerdict(t *testing.T) {
 				t.Errorf("the record must say what the verdict would have been, got %q", rec.Detail)
 			}
 		})
+	}
+}
+
+// The dry-run corner the first version of this feature got wrong: a dry run
+// with no verdict line recorded a detail that said "its comments are posted".
+// A dry run withholds --comment and can post nothing, and `status` shows that
+// string to the operator -- sending them looking for damage that cannot
+// exist, which is a rule this codebase established twice before (see
+// review.ReportError and the killed-review detail).
+func TestDryRunWithNoVerdictDoesNotClaimAnythingWasPosted(t *testing.T) {
+	h, f := verdictHarness(t, review.VerdictUnknown, false, runner.Result{})
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := ghReviewCalls(f); len(calls) != 0 {
+		t.Fatalf("a dry run must submit nothing, got %+v", calls)
+	}
+
+	rec := reviewRecord(t, h)
+	if rec.Outcome != store.OutcomeReviewed {
+		t.Errorf("Outcome = %q, want reviewed", rec.Outcome)
+	}
+	// Unknown, not unset: the reviewer produced no verdict at all, which is
+	// the thing the operator is watching for during the dry-run phase.
+	if rec.Verdict != store.VerdictUnknown {
+		t.Errorf("Verdict = %q, want %q", rec.Verdict, store.VerdictUnknown)
+	}
+	if strings.Contains(rec.Detail, "comments are posted") {
+		t.Errorf("a dry run posts nothing, so the detail must not say comments are posted: %q", rec.Detail)
+	}
+	if !strings.Contains(rec.Detail, "nothing was posted") {
+		t.Errorf("the detail must say plainly that nothing was posted: %q", rec.Detail)
+	}
+	if !strings.Contains(rec.Detail, review.VerdictMarker) {
+		t.Errorf("the detail must still name the missing verdict line: %q", rec.Detail)
+	}
+}
+
+// The live half of the same wording, so the dry-run fix cannot be made by
+// dropping the true statement instead of qualifying it.
+func TestLiveWithNoVerdictSaysTheCommentsArePosted(t *testing.T) {
+	h, _ := verdictHarness(t, review.VerdictUnknown, true, runner.Result{})
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	rec := reviewRecord(t, h)
+	if !strings.Contains(rec.Detail, "its comments are posted") {
+		t.Errorf("a live review did post its comments, and the detail must say so: %q", rec.Detail)
 	}
 }
 

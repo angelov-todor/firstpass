@@ -38,10 +38,12 @@ func (o Outcome) Terminal() bool { return o != OutcomeInFlight }
 type Verdict string
 
 const (
-	// VerdictNone is the zero value: no verdict was submitted. It covers a
-	// dry run, a submission that failed, and every row written before
-	// verdicts existed. Deliberately empty, so an old row on disk and a row
-	// with nothing submitted are the same state rather than two.
+	// VerdictNone is the zero value: there was a verdict and firstpass did
+	// not submit it. It covers a dry run, a submission that failed, and every
+	// row written before verdicts existed. Deliberately empty, so an old row
+	// on disk and a row with nothing submitted are the same state rather than
+	// two. It is distinct from VerdictUnknown, which says there was no
+	// verdict to submit in the first place.
 	VerdictNone Verdict = ""
 	// VerdictApproved means firstpass submitted an approving review.
 	VerdictApproved Verdict = "approved"
