@@ -873,6 +873,10 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		StartedAt:      started,
 		Pass:           1,
 		ReviewedSHAs:   []string{info.HeadSHA},
+		// Recorded as the pass starts, so the pass after it can be told the
+		// truth about whether anything of this one reached the pull request.
+		// A dry run withholds --comment: its findings go to a report on disk.
+		DryRun: p.Cfg.DryRun,
 	}
 	// prevPass is what the reviewer is told. Its Incomplete flag is the
 	// difference between "that pass posted its findings" and "that pass died
@@ -891,8 +895,18 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		// this came from is read again below on the failure paths.
 		rec.ReviewedSHAs = append(append([]string{}, previous.ReviewedCommits()...), info.HeadSHA)
 		prevPass = &review.PreviousPass{
-			HeadSHA:    previous.HeadSHA,
+			HeadSHA: previous.HeadSHA,
+			// A dry-run pass posted nothing, so there is nothing on the pull
+			// request to duplicate or to hold back and the reviewer is told
+			// nothing at all -- see review.Run. Kept out of the note rather
+			// than reworded into it: "a pass looked at this and you cannot
+			// see what it found" is not actionable.
+			Posted:     !previous.DryRun,
 			Incomplete: previous.Outcome != store.OutcomeReviewed,
+			// Only a replay reaches this: a re-post requires a commit no pass
+			// has reviewed. Asked of the whole set, so a replay after a
+			// force-push back to an earlier reviewed commit is recognised too.
+			HeadUnchanged: previous.HasReviewedCommit(info.HeadSHA),
 		}
 	}
 	// Written before claude starts: this record is the only evidence that a

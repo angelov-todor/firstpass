@@ -165,3 +165,43 @@ func TestReviewedSHAsRoundTripAndAreOmittedWhenEmpty(t *testing.T) {
 			"nothing to say are the same shape: %s", b)
 	}
 }
+
+// A dry run records `reviewed` but withholds --comment, so it posted nothing.
+// A later pass has to know that, or it is told to hold back findings that are
+// not on the pull request at all.
+func TestDryRunIsRecordedAndAPreExistingRowReadsAsLive(t *testing.T) {
+	s := openAt(t, t.TempDir())
+	const key = "Example-Org/aex-balances#12"
+	if err := s.PutReview(Review{Key: key, Outcome: OutcomeReviewed, HeadSHA: "aaa", DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.Review(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.DryRun {
+		t.Error("DryRun did not survive the store; a later pass would claim comments were posted")
+	}
+
+	// A row written before the field existed. It must read as live -- the safe
+	// direction, because assuming a pass posted nothing when it did is what
+	// puts a second copy of every comment on a colleague's pull request.
+	legacy := `{"key":"o/r#1","outcome":"reviewed","head_sha":"aaa",` +
+		`"started_at":"2026-09-03T12:00:00Z","decided_at":"2026-09-03T12:12:00Z"}`
+	var r Review
+	if err := json.Unmarshal([]byte(legacy), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.DryRun {
+		t.Error("a pre-existing row must read as live, not as a dry run")
+	}
+
+	b, err := json.Marshal(Review{Key: key, Outcome: OutcomeReviewed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "dry_run") {
+		t.Errorf("a live row must not carry the field, so it looks like the rows already on "+
+			"disk: %s", b)
+	}
+}

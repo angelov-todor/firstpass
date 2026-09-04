@@ -149,14 +149,22 @@ interface with a fake, so `pipeline` tests run without subprocesses.
    passes.
 
    A `replay` sends that note too, which is why `ReviewOne` reads the review record before
-   `opts.replay` makes the pipeline ignore it — read, not obeyed. The documented use of `replay` is
-   a `needs_attention` pull request, whose review died part-way through posting, so its note is
-   worded differently: it says the earlier pass did not finish, that nothing knows how far it got,
-   and asks the reviewer to check the pull request before posting a comment and to raise anything
-   that is not already there. Claiming that pass "posted its findings" would be wrong in both
-   directions — inviting a duplicate of the comments that did land and silence about the ones that
-   never did. The recorded head SHA is the evidence that a pass happened at all, so a skipped or
-   expired row yields no note.
+   `opts.replay` makes the pipeline ignore it — read, not obeyed. The recorded head SHA is the
+   evidence that a pass happened at all, so a skipped or expired row yields no note.
+
+   The note only ever claims what is true of the earlier pass, which takes four shapes. A pass that
+   **did not finish** (`needs_attention`, reached only by `replay`) is described as such: some of
+   its findings may be posted and some may not, nothing knows how far it got, so check the pull
+   request before posting a comment and raise anything not already there — claiming it "posted its
+   findings" would invite both a duplicate of the comments that did land and silence about the ones
+   that never did. A pass that **posted nothing** — a dry run records `reviewed` but withholds
+   `--comment` (`Review.DryRun`) — earns **no note at all**: there is nothing to duplicate and
+   nothing to hold back, and the note's claims would both be false on the very report that is the
+   documented gate before going live. And when the **head has not moved** from a commit some pass
+   reviewed (again only via `replay`), "concentrate on what has changed" names changes that do not
+   exist and a blanket "do not restate" withholds the findings the command was run to get, so that
+   framing is dropped for a request for a full review, keeping only "check before posting a comment
+   that may already be there".
 
    The instruction is a system prompt, not part of the `-p` value: everything after `/code-review`
    there becomes the slash command's `$ARGUMENTS`, which parses an effort level, a `--comment`

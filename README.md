@@ -51,6 +51,25 @@ concentrate on what has changed and not to restate that pass's findings, but
 nothing enforces it. Expect new comments on the pull request, and a new
 verdict submitted alongside them.
 
+What the reviewer is told depends on what the earlier pass actually did:
+
+- **It posted its findings** — the usual live case. The reviewer is told which
+  commit it reviewed and asked not to restate its findings, because they are
+  already on those lines.
+- **It did not finish** (a `needs_attention` record, reached only by
+  `firstpass replay`). The reviewer is told plainly that some of that pass's
+  findings may be posted and some may not, that nothing knows how far it got,
+  and to check the pull request before posting a comment — and to raise
+  anything that is not already there.
+- **It posted nothing** — a dry run records a review but withholds
+  `--comment`, so its findings went to a report on disk. The reviewer is told
+  **nothing at all**: there is no comment to duplicate and nothing to hold
+  back, and claiming otherwise would suppress every finding for no reason.
+- **The head has not moved** (again only via `replay`). "Concentrate on what
+  has changed" would name changes that do not exist, so instead the reviewer
+  is asked for a full review, with the one caveat that still applies: check
+  before posting a comment that may already be there.
+
 All three of these must hold, or the re-post is skipped:
 
 1. The existing record's outcome is `reviewed`, and it records the commit it

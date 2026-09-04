@@ -175,10 +175,21 @@ type PreviousPass struct {
 	// there was a pass at all: only a record written once claude had started
 	// carries one.
 	HeadSHA string
+	// Posted says that pass's findings actually reached the pull request. A
+	// dry run records a review but withholds --comment, so its findings went
+	// to a report on disk instead: nothing is on the pull request, there is
+	// nothing to duplicate and nothing to hold back, and the reviewer is told
+	// nothing at all.
+	Posted bool
 	// Incomplete says that pass did not finish. It was posting its findings
 	// one at a time when it stopped, so some may be on the pull request and
 	// some may not, and nothing can tell which.
 	Incomplete bool
+	// HeadUnchanged says the pull request is still at a commit an earlier pass
+	// reviewed, so there is nothing new to concentrate on and no diff to take.
+	// Only a replay reaches this: a re-post requires a commit no pass has
+	// reviewed.
+	HeadUnchanged bool
 }
 
 // secondPassNote tells the reviewer that a pass has already been here. It is
@@ -199,13 +210,38 @@ type PreviousPass struct {
 // far the earlier pass got, asks the reviewer to check the pull request before
 // posting a comment, and asks it to raise anything that is not already there.
 //
-// Both variants ask for attention on what changed rather than for an
+// The moved-head variants ask for attention on what changed rather than for an
 // incremental diff, and say why: the mirror force-updates refs/firstpass/N, so
 // the previously-reviewed commit can be unreachable in the checkout by now. A
 // reviewer told to "diff against <sha>" would find nothing there and either
 // invent an answer or review nothing at all.
+//
+// HeadUnchanged replaces all of that framing, because none of it is true when
+// the pull request is still at a commit an earlier pass reviewed -- which only
+// a replay reaches. "Concentrate on what has changed" then names changes that
+// do not exist, and a blanket "do not restate that pass's findings" tells the
+// reviewer not to report the findings it is being asked to find, which is close
+// to neutering the command. `firstpass replay` is exactly what someone runs
+// when the first pass was unsatisfying or when they are flipping dry run to
+// live, so it has to come back with a real review. What survives is the one
+// thing still true: a comment may already be sitting on that line.
+//
+// It is deliberately not called at all when the earlier pass posted nothing;
+// see Run and PreviousPass.Posted.
 func secondPassNote(pp PreviousPass) string {
 	short := ShortSHA(pp.HeadSHA)
+
+	if pp.HeadUnchanged {
+		return "A previous automated pass has already reviewed this pull request at the commit " +
+			"it is still at, and its findings were posted as inline comments on it. Nothing has " +
+			"changed since, so review it in full: this pass was asked for deliberately, and a " +
+			"review that held its findings back because an earlier one had them would say " +
+			"nothing at all.\n\n" +
+			"Before you post a finding, check whether that comment is already on the pull " +
+			"request, and do not post it again if it is: a second copy of the same comment on " +
+			"the same line spends the author's time twice on one point. Everything else, raise " +
+			"as you normally would."
+	}
 
 	head := "A previous automated pass already reviewed this pull request at commit " + short +
 		" and posted its findings as inline comments on it.\n\n" +
@@ -259,7 +295,12 @@ func (e *ReportError) Unwrap() error { return e.Err }
 // because everything in it is /code-review's own arguments.
 func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous *PreviousPass) (Result, error) {
 	system := verdictInstruction
-	if previous != nil {
+	// Posted is a gate, not merely a wording input. An earlier pass that
+	// posted nothing left nothing on the pull request to duplicate and nothing
+	// to hold back, so there is nothing worth telling the reviewer -- and both
+	// of the note's claims would be false. previous is still carried in either
+	// way, because the report filename depends on it.
+	if previous != nil && previous.Posted {
 		system += "\n\n" + secondPassNote(*previous)
 	}
 	// extraArgs stays last: it is operator-controlled config, so it must keep

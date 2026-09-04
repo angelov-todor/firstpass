@@ -95,6 +95,21 @@ type Review struct {
 	// decode into a usable set (see ReviewedCommits), and the reviewer is told
 	// about this one commit specifically rather than about the whole set.
 	PreviousHeadSHA string `json:"previous_head_sha,omitempty"`
+	// DryRun says this pass ran with dry_run set, and therefore posted
+	// nothing: /code-review was invoked without --comment, so its findings
+	// went to a report on disk and never reached the pull request.
+	//
+	// A later pass needs it, because the reviewer is told that the pass before
+	// it "posted its findings as inline comments" and asked not to restate
+	// them. After a dry run both halves are false, and the second half would
+	// suppress every finding for no reason -- on the very report that is the
+	// documented gate before going live.
+	//
+	// Absent on every row written before this field existed, which reads as
+	// live. That is the safe direction: assuming a pass posted nothing when it
+	// did is what puts a second copy of every comment on a colleague's pull
+	// request, and the reverse merely asks for a full review.
+	DryRun bool `json:"dry_run,omitempty"`
 	// ReviewedSHAs is every commit a pass of this review has reviewed, oldest
 	// first, with the current HeadSHA last. Read it through ReviewedCommits.
 	//

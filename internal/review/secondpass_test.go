@@ -36,7 +36,7 @@ func TestSecondPassNoteReachesTheSystemPromptAndNotThePrompt(t *testing.T) {
 	f := fakeWithReply("posted")
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, false, t.TempDir())
 
-	if _, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA}); err != nil {
+	if _, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.Calls) != 1 {
@@ -45,7 +45,7 @@ func TestSecondPassNoteReachesTheSystemPromptAndNotThePrompt(t *testing.T) {
 	args := f.Calls[0].Args
 	want := []string{
 		"-p", "/code-review " + ref.URL() + " --comment",
-		"--append-system-prompt", verdictInstruction + "\n\n" + secondPassNote(PreviousPass{HeadSHA: prevSHA}),
+		"--append-system-prompt", verdictInstruction + "\n\n" + secondPassNote(PreviousPass{HeadSHA: prevSHA, Posted: true}),
 		"--permission-mode", "bypassPermissions",
 	}
 	if !slices.Equal(args, want) {
@@ -99,7 +99,7 @@ func TestThePromptIsByteIdenticalAcrossPasses(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := New(second, "claude", nil, dry, t.TempDir()).
-			Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA}); err != nil {
+			Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}); err != nil {
 			t.Fatal(err)
 		}
 		a := first.Calls[0].Args[slices.Index(first.Calls[0].Args, "-p")+1]
@@ -114,7 +114,7 @@ func TestThePromptIsByteIdenticalAcrossPasses(t *testing.T) {
 // restate" halves the reviewer has no reason not to repeat every unfixed
 // finding on the same line it used last time.
 func TestSecondPassNoteNamesThePreviousCommitAndForbidsRestating(t *testing.T) {
-	n := secondPassNote(PreviousPass{HeadSHA: prevSHA})
+	n := secondPassNote(PreviousPass{HeadSHA: prevSHA, Posted: true})
 	for _, want := range []string{"previous automated pass", "inline comments", prevSHA[:12]} {
 		if !strings.Contains(n, want) {
 			t.Errorf("the note must say %q:\n%s", want, n)
@@ -143,7 +143,7 @@ func TestADryRunSecondPassReportDoesNotOverwriteTheFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	rr = New(fakeWithReply("second pass findings"), "claude", nil, true, dir)
-	second, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA})
+	second, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestADryRunSecondPassReportDoesNotOverwriteTheFirst(t *testing.T) {
 // Sending the reviewer in believing either extreme is how the duplicate
 // comment set needs_attention exists to warn about actually happens.
 func TestTheNoteForAnIncompletePreviousPassAdmitsTheUncertainty(t *testing.T) {
-	inc := secondPassNote(PreviousPass{HeadSHA: prevSHA, Incomplete: true})
+	inc := secondPassNote(PreviousPass{HeadSHA: prevSHA, Posted: true, Incomplete: true})
 
 	for _, want := range []string{
 		"did not finish",
@@ -205,7 +205,7 @@ func TestTheNoteForAnIncompletePreviousPassAdmitsTheUncertainty(t *testing.T) {
 	if !strings.Contains(inc, "raise it") {
 		t.Errorf("the incomplete note must still ask for findings that are not already posted:\n%s", inc)
 	}
-	if inc == secondPassNote(PreviousPass{HeadSHA: prevSHA}) {
+	if inc == secondPassNote(PreviousPass{HeadSHA: prevSHA, Posted: true}) {
 		t.Error("the two notes must differ; otherwise Incomplete is decoration")
 	}
 }
@@ -214,7 +214,7 @@ func TestTheNoteForAnIncompletePreviousPassAdmitsTheUncertainty(t *testing.T) {
 func TestTheIncompleteNoteAlsoTravelsAsASystemPromptAndNotInThePrompt(t *testing.T) {
 	f := fakeWithReply("posted")
 	rr := New(f, "claude", nil, false, t.TempDir())
-	pp := &PreviousPass{HeadSHA: prevSHA, Incomplete: true}
+	pp := &PreviousPass{HeadSHA: prevSHA, Posted: true, Incomplete: true}
 
 	if _, err := rr.Run(context.Background(), "work", ref, pp); err != nil {
 		t.Fatal(err)
@@ -230,6 +230,106 @@ func TestTheIncompleteNoteAlsoTravelsAsASystemPromptAndNotInThePrompt(t *testing
 	for _, frag := range []string{"\n", "did not finish", "previous automated pass"} {
 		if strings.Contains(prompt, frag) {
 			t.Errorf("-p = %q must not carry %q", prompt, frag)
+		}
+	}
+}
+
+// A dry run records `reviewed` but withholds --comment, so its findings went
+// to a local report and never reached the pull request. The complete note
+// would then be flatly untrue on both of its claims -- "posted its findings as
+// inline comments on it" and "they are already on the pull request" -- and its
+// "do not restate" would suppress every finding for no reason at all. Since
+// nothing is on the pull request there is nothing to warn about, so nothing is
+// said.
+func TestAPreviousPassThatPostedNothingSendsNoNote(t *testing.T) {
+	f := fakeWithReply("posted")
+	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, false, t.TempDir())
+
+	if _, err := rr.Run(context.Background(), "work", ref,
+		&PreviousPass{HeadSHA: prevSHA, Posted: false}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"-p", "/code-review " + ref.URL() + " --comment",
+		"--append-system-prompt", verdictInstruction,
+		"--permission-mode", "bypassPermissions",
+	}
+	if !slices.Equal(f.Calls[0].Args, want) {
+		t.Errorf("Args = %q, want the first-pass argv: there is nothing on the pull request to "+
+			"tell the reviewer about", f.Calls[0].Args)
+	}
+}
+
+// The report still goes to its own filename, so a dry-run pass following a
+// dry-run pass does not overwrite the report the operator is about to read.
+// That is why the previous pass is still passed in at all.
+func TestAPassAfterAnUnpostedOneStillGetsItsOwnReportName(t *testing.T) {
+	dir := t.TempDir()
+	first, err := New(fakeWithReply("pass one"), "claude", nil, true, dir).
+		Run(context.Background(), "work", ref, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := New(fakeWithReply("pass two"), "claude", nil, true, dir).
+		Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ReportPath == second.ReportPath {
+		t.Fatalf("both passes wrote %q; the report the operator is reading is gone", first.ReportPath)
+	}
+}
+
+// A replay at the very commit the earlier pass reviewed. "Concentrate on what
+// has changed" names changes that do not exist, and a blanket "do not restate"
+// tells the reviewer not to report the findings it is being asked to find --
+// close to neutering the command, and replay is exactly what someone runs when
+// pass 1 was unsatisfying or when they are flipping dry run to live.
+//
+// Both previous-pass shapes get the same instruction, because the useful one
+// is the same either way: review in full, and check before posting a comment
+// that may already be there.
+func TestTheNoteForAnUnchangedHeadAsksForAFullReview(t *testing.T) {
+	for _, incomplete := range []bool{false, true} {
+		pp := PreviousPass{HeadSHA: prevSHA, Posted: true, HeadUnchanged: true, Incomplete: incomplete}
+		n := secondPassNote(pp)
+
+		if strings.Contains(n, "Concentrate on what has changed") {
+			t.Errorf("incomplete=%v: nothing has changed, so this asks for the impossible:\n%s",
+				incomplete, n)
+		}
+		if strings.Contains(n, "Do not restate findings from that pass") {
+			t.Errorf("incomplete=%v: a blanket refusal here suppresses the findings the review "+
+				"is being asked for:\n%s", incomplete, n)
+		}
+		if !strings.Contains(n, "review it in full") {
+			t.Errorf("incomplete=%v: the reviewer must be asked for a full review:\n%s", incomplete, n)
+		}
+		if !strings.Contains(n, "already on the pull request") {
+			t.Errorf("incomplete=%v: the duplicate-comment hazard is the one thing still worth "+
+				"saying:\n%s", incomplete, n)
+		}
+		// The "not a diff against X" paragraph is about a commit that may have
+		// become unreachable. The head *is* that commit here.
+		if strings.Contains(n, "may no longer be reachable") {
+			t.Errorf("incomplete=%v: the pull request is at that commit, so this is nonsense:\n%s",
+				incomplete, n)
+		}
+	}
+}
+
+// And the moved-head notes keep saying what they said, so the unchanged-head
+// variant cannot be implemented by weakening the common case.
+func TestTheMovedHeadNotesStillAskToFocusOnWhatChanged(t *testing.T) {
+	for _, incomplete := range []bool{false, true} {
+		n := secondPassNote(PreviousPass{HeadSHA: prevSHA, Posted: true, Incomplete: incomplete})
+		if !strings.Contains(n, "Concentrate on what has changed since "+prevSHA[:12]) {
+			t.Errorf("incomplete=%v: the moved-head note must still point at what changed:\n%s",
+				incomplete, n)
+		}
+		if !strings.Contains(n, "may no longer be reachable") {
+			t.Errorf("incomplete=%v: the moved-head note must still explain why it is not a diff:\n%s",
+				incomplete, n)
 		}
 	}
 }

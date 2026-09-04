@@ -228,3 +228,139 @@ func TestAnAnonymousReparkDoesNotWipeRecordedProvenance(t *testing.T) {
 		t.Errorf("Attempts = %d, want 2", pd.Attempts)
 	}
 }
+
+// ---- what the reviewer is told about the pass before it ----
+
+// A pass following a dry-run pass must not be told that comments were posted:
+// a dry run withholds --comment, so its findings went to a report on disk.
+func TestAPassFollowingADryRunPassIsToldNothingAboutIt(t *testing.T) {
+	h := newHarness(t, []chat.Message{
+		postAt(thirdPost, "another look "+prURL("aex-balances", 12), decidedAt.Add(time.Hour)),
+	})
+	h.seedWatermark(t)
+	seeded := reviewedAfterTwoPosts()
+	seeded.DryRun = true
+	seedFirstPass(t, h, seeded, newSHA)
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	pp := onlyPreviousPass(t, h)
+	if pp == nil {
+		t.Fatal("the previous pass must still be carried: the dry-run report filename needs it")
+	}
+	if pp.Posted {
+		t.Error("Posted = true after a dry-run pass; nothing of it reached the pull request, so " +
+			"the reviewer would be told to hold back findings that are not there")
+	}
+	// And the pass still counts, so the record and the report name are right.
+	if rec, _, _ := h.st.Review(secondPassKey); rec.Pass != 2 || rec.PreviousHeadSHA != oldSHA {
+		t.Errorf("record = %+v, want pass 2 retaining %q", rec, oldSHA)
+	}
+}
+
+// A live pass is what the reviewer is warned about.
+func TestAPassFollowingALivePassIsToldItsFindingsArePosted(t *testing.T) {
+	h := newHarness(t, []chat.Message{
+		postAt(thirdPost, "another look "+prURL("aex-balances", 12), decidedAt.Add(time.Hour)),
+	})
+	h.seedWatermark(t)
+	h.cfg.DryRun = false
+	h.apply()
+	seedFirstPass(t, h, reviewedAfterTwoPosts(), newSHA)
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	pp := onlyPreviousPass(t, h)
+	if pp == nil || !pp.Posted {
+		t.Fatalf("previous pass = %+v, want one whose findings are on the pull request", pp)
+	}
+	if pp.HeadUnchanged {
+		t.Error("HeadUnchanged = true; a re-post requires a commit no pass has reviewed")
+	}
+}
+
+// Whether this pass is a dry run is recorded as it starts, so the pass after
+// it can be told the truth.
+func TestTheDryRunModeOfAPassIsRecorded(t *testing.T) {
+	for _, dry := range []bool{true, false} {
+		h := newHarness(t, []chat.Message{msg(firstTrigger, prURL("aex-balances", 12))})
+		h.seedWatermark(t)
+		h.cfg.DryRun = dry
+		h.apply()
+
+		if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+			t.Fatal(err)
+		}
+		rec, ok, _ := h.st.Review(secondPassKey)
+		if !ok {
+			t.Fatal("no record")
+		}
+		if rec.DryRun != dry {
+			t.Errorf("dry_run = %v, DryRun = %v; the pass after this one reads this field to "+
+				"decide whether any comment is on the pull request", dry, rec.DryRun)
+		}
+	}
+}
+
+// A replay at the very commit the earlier pass reviewed: the reviewer must not
+// be pointed at changes that do not exist.
+func TestAReplayAtAnAlreadyReviewedCommitSaysTheHeadHasNotMoved(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		live string
+	}{
+		{"the commit the last pass reviewed", newSHA},
+		{"a commit an earlier pass reviewed", oldSHA},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			h.cfg.DryRun = false
+			h.apply()
+			rec := twoPassRecord()
+			rec.Key = replayRef.Key()
+			if err := h.st.PutReview(rec); err != nil {
+				t.Fatal(err)
+			}
+			h.prs.info[replayRef.Key()] = ghprOpen(tc.live)
+
+			if _, err := h.p.ReviewOne(context.Background(), replayRef, Options{}); err != nil {
+				t.Fatal(err)
+			}
+			pp := onlyPreviousPass(t, h)
+			if pp == nil {
+				t.Fatal("the reviewer was told nothing")
+			}
+			if !pp.HeadUnchanged {
+				t.Errorf("HeadUnchanged = false for live head %q, which a pass has already "+
+					"reviewed; the reviewer would be asked to concentrate on changes that do "+
+					"not exist and to withhold the findings it is being asked for", tc.live)
+			}
+		})
+	}
+}
+
+// A replay after new commits is the ordinary case and keeps the ordinary
+// framing, so the unchanged-head flag cannot be implemented as "always true
+// for a replay".
+func TestAReplayAfterNewCommitsSaysTheHeadHasMoved(t *testing.T) {
+	h := newHarness(t, nil)
+	h.cfg.DryRun = false
+	h.apply()
+	rec := twoPassRecord()
+	rec.Key = replayRef.Key()
+	if err := h.st.PutReview(rec); err != nil {
+		t.Fatal(err)
+	}
+	h.prs.info[replayRef.Key()] = ghprOpen(thirdSHA)
+
+	if _, err := h.p.ReviewOne(context.Background(), replayRef, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	pp := onlyPreviousPass(t, h)
+	if pp == nil || pp.HeadUnchanged {
+		t.Errorf("previous pass = %+v, want HeadUnchanged false: the head has moved to a commit "+
+			"no pass has reviewed", pp)
+	}
+}
