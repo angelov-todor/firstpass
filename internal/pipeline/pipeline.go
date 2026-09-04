@@ -44,7 +44,13 @@ type (
 		Prepare(ctx context.Context, ref prref.PRRef) (dir string, cleanup func(), err error)
 	}
 	Reviewer interface {
-		Run(ctx context.Context, dir string, ref prref.PRRef) (review.Result, error)
+		// previousHeadSHA is the commit an earlier pass over this pull
+		// request reviewed, and empty means this is the first pass. The
+		// reviewer needs it to be told a pass has already been here:
+		// otherwise a second pass restates every finding the author has not
+		// fixed, on the same lines. It reaches claude as part of the system
+		// prompt, never in the -p value.
+		Run(ctx context.Context, dir string, ref prref.PRRef, previousHeadSHA string) (review.Result, error)
 	}
 	// Reactor puts reactions on chat messages, so the team can see that a
 	// posted pull request has been picked up. Everything it does is
@@ -723,7 +729,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// candidate in the batch.
 	rep.reviewAttempts++
 	p.progress(Event{Stage: StageReviewStarted, Ref: ref, Index: idx, Total: total})
-	res, rerr := p.Rev.Run(rctx, dir, ref)
+	res, rerr := p.Rev.Run(rctx, dir, ref, rec.PreviousHeadSHA)
 	done := p.now()
 
 	rec.DecidedAt = done

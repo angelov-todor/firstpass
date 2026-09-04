@@ -153,6 +153,44 @@ const verdictInstruction = "You are running as firstpass: an automated first pas
 	"can see about what you found: if the line is missing or reworded, firstpass submits no " +
 	"verdict at all."
 
+// shortSHA is how a commit is named to a human -- or to a reviewing agent.
+// Twelve characters, because the whole forty are noise in prose and the
+// reviewer never has to type it back.
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
+// secondPassNote tells the reviewer that a pass has already been here. It is
+// appended to verdictInstruction and travels as --append-system-prompt for
+// exactly the reasons that instruction does: prose in the -p value becomes
+// /code-review's own $ARGUMENTS. Prompt() stays byte-identical across passes.
+//
+// Without it a second pass restates every finding the author has not yet
+// fixed, on the same lines, putting a second copy of each comment on a
+// colleague's pull request -- which is the whole cost this feature could
+// impose and the only one it cannot detect for itself.
+//
+// It asks for attention on what changed rather than for an incremental diff,
+// and says why: the mirror force-updates refs/firstpass/N, so the
+// previously-reviewed commit can be unreachable in the checkout by now. A
+// reviewer told to "diff against <sha>" would find nothing there and either
+// invent an answer or review nothing at all.
+func secondPassNote(previousHeadSHA string) string {
+	short := shortSHA(previousHeadSHA)
+	return "A previous automated pass already reviewed this pull request at commit " + short +
+		" and posted its findings as inline comments on it.\n\n" +
+		"Concentrate on what has changed since " + short + ". Do not restate findings from that " +
+		"pass: they are already on the pull request, and repeating one puts a second copy of the " +
+		"same comment on the same line, which spends the author's time twice on one point.\n\n" +
+		"Review the pull request as it now stands, not a diff against " + short + ": firstpass " +
+		"force-updates the mirror ref it checks out, so " + short + " may no longer be reachable " +
+		"from the checkout you are looking at. Work out what has changed from the pull request " +
+		"itself."
+}
+
 // ReportError reports that the review itself finished but its dry-run report
 // could not be written.
 //
@@ -174,12 +212,22 @@ func (e *ReportError) Unwrap() error { return e.Err }
 // happened, and reading a dry-run report is the gate before ever going live,
 // so discarding the captured output on the failure path left nothing to read
 // at the worst possible moment. The report names the failure itself.
-func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef) (Result, error) {
+//
+// previousHeadSHA is the commit an earlier pass over this pull request
+// reviewed, and empty means this is the first pass. It changes only the
+// system prompt and the dry-run report's filename: the -p value is
+// byte-identical across passes, because everything in it is /code-review's
+// own arguments.
+func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previousHeadSHA string) (Result, error) {
+	system := verdictInstruction
+	if previousHeadSHA != "" {
+		system += "\n\n" + secondPassNote(previousHeadSHA)
+	}
 	// extraArgs stays last: it is operator-controlled config, so it must keep
 	// being able to override anything firstpass sets for itself.
 	args := append([]string{
 		"-p", rr.Prompt(ref),
-		"--append-system-prompt", verdictInstruction,
+		"--append-system-prompt", system,
 	}, rr.extraArgs...)
 
 	res, err := rr.r.Run(ctx, dir, rr.claude, args...)
@@ -205,7 +253,7 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef) (Result,
 		return out, runErr
 	}
 
-	path, werr := rr.writeReport(ref, res.Stdout, out.Verdict, runErr)
+	path, werr := rr.writeReport(ref, previousHeadSHA, res.Stdout, out.Verdict, runErr)
 	if werr != nil {
 		if runErr != nil {
 			// The review failed and so did the report. The review failure is
@@ -241,12 +289,23 @@ func verdictNote(v Verdict) string {
 // writeReport writes the dry-run report. failure, when non-nil, is the
 // review's own failure and is recorded in the header, so a report that holds
 // only partial output cannot be mistaken for a complete review.
-func (rr *Runner) writeReport(ref prref.PRRef, body []byte, verdict Verdict, failure error) (string, error) {
+// A later pass over the same pull request gets its own filename, suffixed
+// with the commit the pass before it reviewed. Both reports then survive,
+// which is what the operator needs to see what the new commits changed --
+// and the first pass's name is left exactly as it was, so nothing already on
+// disk moves.
+func (rr *Runner) writeReport(ref prref.PRRef, previousHeadSHA string, body []byte,
+	verdict Verdict, failure error) (string, error) {
+
 	if err := os.MkdirAll(rr.reportsDir, 0o700); err != nil {
 		return "", err
 	}
-	path := filepath.Join(rr.reportsDir,
-		fmt.Sprintf("%s_%s_%d.md", ref.Owner, ref.Repo, ref.Number))
+	name := fmt.Sprintf("%s_%s_%d.md", ref.Owner, ref.Repo, ref.Number)
+	if previousHeadSHA != "" {
+		name = fmt.Sprintf("%s_%s_%d_after_%s.md",
+			ref.Owner, ref.Repo, ref.Number, shortSHA(previousHeadSHA))
+	}
+	path := filepath.Join(rr.reportsDir, name)
 
 	header := fmt.Sprintf("# Review of %s\n\n%s\n\nGenerated %s — dry run, nothing posted.\n",
 		ref.Key(), ref.URL(), time.Now().UTC().Format(time.RFC3339))

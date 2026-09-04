@@ -238,7 +238,7 @@ func (quietTestWTs) Prepare(context.Context, prref.PRRef) (string, func(), error
 
 type quietTestRev struct{}
 
-func (quietTestRev) Run(context.Context, string, prref.PRRef) (review.Result, error) {
+func (quietTestRev) Run(context.Context, string, prref.PRRef, string) (review.Result, error) {
 	return review.Result{}, nil
 }
 
