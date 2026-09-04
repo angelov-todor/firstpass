@@ -54,6 +54,12 @@ type fakePRs struct {
 	// runner.Fake instead; see verdict_test.go.
 	submitted []submittedVerdict
 	submitErr error
+
+	// inspected records every ref this fake was asked about, in order. Some
+	// gates exist precisely to decide without a GitHub call, so "Inspect was
+	// never called" is the assertion for those -- the outcome alone would be
+	// satisfied by the gate having moved below GitHub.
+	inspected []string
 }
 
 type submittedVerdict struct {
@@ -63,6 +69,7 @@ type submittedVerdict struct {
 }
 
 func (f *fakePRs) Inspect(_ context.Context, ref prref.PRRef) (ghpr.PRInfo, error) {
+	f.inspected = append(f.inspected, ref.Key())
 	if e, ok := f.err[ref.Key()]; ok {
 		return ghpr.PRInfo{}, e
 	}

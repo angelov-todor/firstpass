@@ -153,10 +153,10 @@ const verdictInstruction = "You are running as firstpass: an automated first pas
 	"can see about what you found: if the line is missing or reworded, firstpass submits no " +
 	"verdict at all."
 
-// shortSHA is how a commit is named to a human -- or to a reviewing agent.
+// ShortSHA is how a commit is named to a human -- or to a reviewing agent.
 // Twelve characters, because the whole forty are noise in prose and the
 // reviewer never has to type it back.
-func shortSHA(sha string) string {
+func ShortSHA(sha string) string {
 	if len(sha) > 12 {
 		return sha[:12]
 	}
@@ -179,7 +179,7 @@ func shortSHA(sha string) string {
 // reviewer told to "diff against <sha>" would find nothing there and either
 // invent an answer or review nothing at all.
 func secondPassNote(previousHeadSHA string) string {
-	short := shortSHA(previousHeadSHA)
+	short := ShortSHA(previousHeadSHA)
 	return "A previous automated pass already reviewed this pull request at commit " + short +
 		" and posted its findings as inline comments on it.\n\n" +
 		"Concentrate on what has changed since " + short + ". Do not restate findings from that " +
@@ -303,7 +303,7 @@ func (rr *Runner) writeReport(ref prref.PRRef, previousHeadSHA string, body []by
 	name := fmt.Sprintf("%s_%s_%d.md", ref.Owner, ref.Repo, ref.Number)
 	if previousHeadSHA != "" {
 		name = fmt.Sprintf("%s_%s_%d_after_%s.md",
-			ref.Owner, ref.Repo, ref.Number, shortSHA(previousHeadSHA))
+			ref.Owner, ref.Repo, ref.Number, ShortSHA(previousHeadSHA))
 	}
 	path := filepath.Join(rr.reportsDir, name)
 

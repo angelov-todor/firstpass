@@ -128,6 +128,68 @@ func inFlightDetail(ref prref.PRRef) string {
 		"run `firstpass replay " + ref.URL() + "` to review it again deliberately"
 }
 
+// secondPassDue reports whether an existing record plus this candidate's
+// trigger satisfy the two conditions for a second pass that can be decided
+// without asking GitHub anything. The third -- that the pull request actually
+// has new commits -- needs the live head SHA and is checked just below
+// Inspect.
+//
+// Condition 1: the record's outcome is `reviewed`, and nothing else -- and it
+// records the commit it reviewed.
+//
+// needs_attention in particular does not qualify. It means a review died
+// mid-post, so comments may be half posted on a colleague's pull request, and
+// an automatic retry risks a second copy of each of them. A re-post is not
+// consent to that; `firstpass replay` is. Every skipped outcome fails this
+// too, for the plainer reason that nothing was ever reviewed: there is no
+// first pass for a second one to follow.
+//
+// A reviewed record with no head SHA on it fails as well, and that is the
+// safe direction rather than an oversight. Condition 3 is the guarantee that
+// no pull request is reviewed twice for the same commit; a record that does
+// not say which commit it reviewed cannot support that guarantee, so treating
+// "unknown" as "different" would be double-posting on a colleague's pull
+// request on the strength of a missing field. A pull request reviewed off the
+// pending backlog carries no trigger message either, so the pairing is the
+// usual one: no first-pass evidence, no automatic second pass. `firstpass
+// replay` still works, and says the operator meant it.
+//
+// Condition 2: the trigger is a different, non-empty chat message.
+//
+// This is what tells a genuine re-post from the two things that look like one.
+// The same message can still be sitting in the fifty-message fetch window on
+// the next sweep -- a backfill, or a watermark gap, will offer it again -- and
+// re-reviewing on that would review a pull request once per sweep forever. A
+// ref re-offered out of the pending bucket carries no trigger at all, because
+// pending is keyed by pull request rather than by post, so an empty trigger is
+// never a re-post either.
+func secondPassDue(prev store.Review, trigger string) bool {
+	return prev.Outcome == store.OutcomeReviewed && prev.HeadSHA != "" &&
+		trigger != "" && trigger != prev.TriggerMessage
+}
+
+// noteRetrigger records that a re-post was seen and had nothing new in it, by
+// moving the record's trigger to the message that asked. That is the only
+// field it touches: the pull request was not reviewed again, so the recorded
+// SHA, verdict, timings and detail all still describe exactly what happened,
+// and rewriting any of them would claim otherwise.
+//
+// Without it the same re-post would be re-inspected -- one `gh pr view` -- on
+// every sweep for as long as it stayed in the fetch window.
+//
+// Print-only writes nothing, like every other write in handle.
+func (p *Pipeline) noteRetrigger(prev store.Review, trigger string, opts Options) error {
+	if opts.PrintOnly {
+		return nil
+	}
+	prev.TriggerMessage = trigger
+	if err := p.Store.PutReview(prev); err != nil {
+		p.Log.Error("put review", "key", prev.Key, "err", err)
+		return err
+	}
+	return nil
+}
+
 // Decision is one line of the sweep's report.
 type Decision struct {
 	Ref    prref.PRRef
@@ -554,6 +616,11 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// a second set of comments on a colleague's PR. Skipped instead, the
 	// record simply stays where it is until handle overwrites it with a fresh
 	// decision of its own.
+	// previous is the pass that already reviewed this pull request, carried
+	// down from the record gate when a second pass may be due. It is nil for
+	// every other candidate, which is every candidate but a re-post.
+	var previous *store.Review
+
 	if !opts.replay {
 		if prev, ok, err := p.Store.Review(ref.Key()); err != nil {
 			p.Log.Error("read review", "key", ref.Key(), "err", err)
@@ -592,7 +659,17 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 				// decided" here would read as a PR that was dealt with cleanly.
 				return dec(ActionNeedsAttention, inFlightReason)
 			}
-			return dec(ActionSkip, "already decided: "+string(prev.Outcome))
+			if !secondPassDue(prev, c.trigger) {
+				return dec(ActionSkip, "already decided: "+string(prev.Outcome))
+			}
+			// Conditions 1 and 2 hold: a reviewed record, re-posted by a
+			// different message. Condition 3 -- new commits -- needs the live
+			// head SHA, which only GitHub knows, so this candidate falls
+			// through with its previous record in hand and is decided just
+			// below Inspect. Nothing else about the gate order changes: every
+			// other outcome still skips right here, above every gate that
+			// follows.
+			previous = &prev
 		}
 	}
 
@@ -653,6 +730,26 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		note(p.deferAttempt(ref, "inspect failed: "+err.Error(), opts))
 		return dec(ActionDefer, "inspect failed: "+err.Error())
 	}
+
+	// Condition 3, and the only place it can be asked: the live head SHA.
+	//
+	// This is the whole new cost of the second pass -- one `gh pr view` per
+	// re-post that turns out to have no new commits. Accepted deliberately:
+	// the alternative is trusting the re-post itself, which would review a
+	// commit whose comments are already sitting on those exact lines.
+	//
+	// It sits above the state gate on purpose. A pull request re-posted after
+	// it was merged is the common case, and skipping here leaves its reviewed
+	// record -- and the verdict on it -- intact, where falling through to the
+	// state gate would overwrite it with skipped_state.
+	if previous != nil && info.HeadSHA == previous.HeadSHA {
+		// The trigger is updated so the same re-post is not re-inspected on
+		// every sweep for as long as it sits in the fetch window. Nothing else
+		// on the record moves: nothing else happened.
+		note(p.noteRetrigger(*previous, c.trigger, opts))
+		return dec(ActionSkip, "re-posted with no new commits since "+
+			review.ShortSHA(previous.HeadSHA))
+	}
 	if info.State != "OPEN" {
 		note(p.terminal(ref, store.OutcomeSkippedState, c.trigger, "state "+info.State, opts))
 		return dec(ActionSkip, "state "+info.State)
@@ -669,7 +766,11 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	}
 
 	if opts.PrintOnly {
-		return dec(ActionWouldReview, "OPEN, not draft, author "+info.Author)
+		reason := "OPEN, not draft, author " + info.Author
+		if previous != nil {
+			reason += "; second pass, new commits since " + review.ShortSHA(previous.HeadSHA)
+		}
+		return dec(ActionWouldReview, reason)
 	}
 
 	// A bare clone of a whole repository is the longest subprocess firstpass
@@ -702,6 +803,15 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		HeadSHA:        info.HeadSHA,
 		TriggerMessage: c.trigger,
 		StartedAt:      started,
+		Pass:           1,
+	}
+	if previous != nil {
+		// The commit the previous pass reviewed is kept rather than
+		// overwritten: it is the only record of which commit already has
+		// this tool's comments on it, and it is what the reviewer is told
+		// about so it does not restate that pass's findings.
+		rec.Pass = previous.PassNumber() + 1
+		rec.PreviousHeadSHA = previous.HeadSHA
 	}
 	// Written before claude starts: this record is the only evidence that a
 	// review was underway if the process dies while posting comments.
@@ -819,7 +929,11 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		Stage: StageReviewFinished, Ref: ref, Index: idx, Total: total,
 		Detail: reviewFinishedDetail(string(rec.Outcome), done.Sub(started)),
 	})
-	return dec(ActionReview, "reviewed")
+	reason := "reviewed"
+	if rec.Pass > 1 {
+		reason = "reviewed (pass " + strconv.Itoa(rec.Pass) + ")"
+	}
+	return dec(ActionReview, reason)
 }
 
 // submitVerdict submits the verdict of a review that has just succeeded, and
