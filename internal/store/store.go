@@ -61,7 +61,11 @@ type Pending struct {
 	// forward by the interval since the previous paused sighting, so only the
 	// paused time is excluded. A row written before this field existed decodes
 	// as zero, which is exactly right -- it was not parked by a pause.
-	LastPausedAt time.Time `json:"last_paused_at,omitempty"`
+	//
+	// No omitempty: it is inert on a struct type, so the encoder would emit
+	// the zero time regardless. Claiming otherwise invites the wrong
+	// inference about what an unpaused row looks like on disk.
+	LastPausedAt time.Time `json:"last_paused_at"`
 }
 
 // Watermark is the newest chat message already processed. The message name is

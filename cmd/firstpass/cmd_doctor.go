@@ -32,10 +32,15 @@ const (
 	// one command whose whole job is to say whether the dependencies are
 	// healthy -- is worse than waiting another ten seconds for the truth.
 	doctorCheckTimeout = 30 * time.Second
-	// doctorOverallTimeout keeps the command itself bounded: four sequential
-	// checks at doctorCheckTimeout each (4 x 30s) fit inside it with room to
-	// spare, and nothing can run longer than this in total.
-	doctorOverallTimeout = 2 * time.Minute
+	// doctorOverallTimeout keeps the command itself bounded, and must leave
+	// real headroom over the sum of the checks. Four sequential checks at
+	// doctorCheckTimeout are already 4 x 30s = 2m, so a 2m overall budget gave
+	// none: the last check to run -- "google chat reachable", the one
+	// fatalChatBanner explicitly sends the operator to -- would inherit a
+	// near-zero deadline and fail on the context rather than on its merits.
+	// That is the exact misattribution the per-check deadline exists to
+	// prevent, so the overall budget has to exceed the sum, not equal it.
+	doctorOverallTimeout = 3 * time.Minute
 )
 
 // withCheckTimeout runs one doctor check under its own deadline, derived from

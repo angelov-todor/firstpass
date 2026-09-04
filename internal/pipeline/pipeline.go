@@ -817,8 +817,9 @@ func (p *Pipeline) hold(ref prref.PRRef, reason string, opts Options) error {
 // PendingMaxAge un-expirable if a pause lands before the sweep that would have
 // retired it.
 //
-// Up to one sweep interval of paused time goes unaccounted, between the final
-// paused sweep and the resume. That is deliberate and conservative: it
+// Up to two sweep intervals of paused time go unaccounted: between the pause
+// file appearing and the first paused sighting, and between the final paused
+// sweep and the resume. That is deliberate and conservative: it
 // under-credits the pause by minutes against a week-long budget, erring
 // towards retiring a stale entry rather than keeping it forever.
 //
