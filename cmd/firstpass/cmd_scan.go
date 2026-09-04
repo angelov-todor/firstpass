@@ -21,6 +21,7 @@ func cmdScan(args []string) error {
 	printOnly := fs.Bool("print-only", false, "decide and print, changing no state")
 	live := fs.Bool("live", false, "post comments to GitHub even if dry_run is set in config")
 	backfill := fs.Int("backfill", 0, "take the last N messages, ignoring the watermark")
+	quiet := fs.Bool("quiet", false, "suppress progress output; the result table still prints")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -33,6 +34,19 @@ func cmdScan(args []string) error {
 		return err
 	}
 	defer a.Close()
+
+	// Progress renders to stderr, never stdout: renderSweep below is the
+	// stdout output an operator may redirect to a file, and a heartbeat line
+	// corrupting that redirected output would be worse than the silence this
+	// exists to fix. The deferred stop is a safety net -- Handle already
+	// stops the heartbeat on every review_finished event -- so no heartbeat
+	// goroutine can outlive this command on any exit path.
+	renderer := wireProgress(a.pipe, *quiet, os.Stderr, a.cfg.ReviewTimeout.D())
+	defer func() {
+		if renderer != nil {
+			renderer.stopHeartbeat()
+		}
+	}()
 
 	rep, err := a.pipe.Sweep(context.Background(), pipeline.Options{
 		PrintOnly: *printOnly,

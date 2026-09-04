@@ -74,8 +74,11 @@ max_reviews_per_sweep: 3
 
 # How long a single review may run before it is treated as needs_attention
 # (never retried automatically — a timeout may have fired mid-post).
-# Default: 20m
-review_timeout: 20m
+# A real review of a 3-commit PR took 12m15s -- 61% of the old 20m default --
+# so 20m left too little headroom before a slow-but-fine review was silently
+# converted into a needs_attention the operator has to chase down by hand.
+# Default: 30m
+review_timeout: 30m
 
 # Timeout for the chat-reading subprocess.
 # Default: 2m

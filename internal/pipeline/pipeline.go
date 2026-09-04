@@ -155,6 +155,12 @@ type Pipeline struct {
 	Rev   Reviewer
 	Log   *slog.Logger
 	Now   func() time.Time
+
+	// Progress, when non-nil, is called as a sweep proceeds so a caller can
+	// show the operator that a long review is working rather than wedged. It
+	// must not block; the CLI renders it. Left nil, nothing about progress
+	// reporting changes for the caller: every call site guards it.
+	Progress func(Event)
 }
 
 type candidate struct {
@@ -210,11 +216,13 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 	// that does not.
 	if !hasWM && opts.Backfill <= 0 {
 		rep.ColdStart = true
+		p.progress(Event{Stage: StageMessagesFetched, Detail: messagesFetchedDetail(len(msgs), false)})
 		if len(msgs) > 0 && !opts.PrintOnly {
 			if err := p.setWatermark(msgs[0]); err != nil {
 				return rep, err
 			}
 		}
+		p.progress(Event{Stage: StageSweepFinished, Detail: "cold start: nothing reviewed"})
 		return rep, nil
 	}
 
@@ -235,13 +243,17 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 			"message fetched were not scanned; holding the watermark so the next sweep re-scans",
 			"watermark", since, "oldest_fetched", oldest, "fetch_limit", limit)
 	}
+	p.progress(Event{Stage: StageMessagesFetched, Detail: messagesFetchedDetail(len(msgs), rep.WatermarkGap)})
 
 	if err := p.recoverInFlight(&rep, opts); err != nil {
 		return rep, err
 	}
 
+	cands := p.candidates(msgs)
+	p.progress(Event{Stage: StageCandidates, Total: len(cands)})
+
 	interrupted := false
-	for _, c := range p.candidates(msgs) {
+	for i, c := range cands {
 		// Ctrl-C mid-sweep used to keep iterating: every remaining candidate
 		// burned a pending attempt on the cancelled-context Inspect failure,
 		// and then the watermark advanced over the lot.
@@ -250,12 +262,13 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 			p.Log.Warn("sweep interrupted; holding the watermark", "err", ctx.Err())
 			break
 		}
-		rep.Decisions = append(rep.Decisions, p.handle(ctx, c, &rep, opts))
+		rep.Decisions = append(rep.Decisions, p.handle(ctx, c, &rep, opts, i+1, len(cands)))
 	}
 
 	p.appendRecoveredDecisions(&rep)
 
 	if interrupted {
+		p.progress(Event{Stage: StageSweepFinished, Detail: "interrupted"})
 		return rep, ctx.Err()
 	}
 
@@ -272,6 +285,7 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 			return rep, err
 		}
 	}
+	p.progress(Event{Stage: StageSweepFinished, Detail: fmt.Sprintf("%d reviewed", rep.Reviewed)})
 	return rep, nil
 }
 
@@ -329,6 +343,13 @@ func (p *Pipeline) recoverInFlight(rep *SweepReport, opts Options) error {
 		}
 		rep.recovered[rec.Key] = true
 		p.Log.Warn("needs attention", "key", rec.Key, "reason", inFlightReason)
+	}
+	if len(rep.recovered) > 0 {
+		p.progress(Event{
+			Stage:  StageRecovered,
+			Total:  len(rep.recovered),
+			Detail: fmt.Sprintf("%d in-flight record(s) from a dead run converted to needs_attention", len(rep.recovered)),
+		})
 	}
 	return nil
 }
@@ -402,7 +423,12 @@ func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
 
 // handle applies the decision table to one candidate. The order of the checks
 // is load-bearing; see the comments at each gate.
-func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, opts Options) Decision {
+//
+// idx and total describe this candidate's position in the sweep's whole
+// candidate list (1-based) and are carried on every progress event handle
+// emits, so a renderer can show "[12/70]" even though most candidates never
+// reach the later stages.
+func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, opts Options, idx, total int) Decision {
 	ref := c.ref
 	dec := func(a Action, reason string) Decision {
 		return Decision{Ref: ref, Action: a, Reason: reason}
@@ -514,6 +540,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		return dec(ActionDefer, "per-sweep cap reached")
 	}
 
+	p.progress(Event{Stage: StageInspecting, Ref: ref, Index: idx, Total: total})
 	ictx, cancelInspect := context.WithTimeout(ctx, p.Cfg.GHTimeout.D())
 	info, err := p.PRs.Inspect(ictx, ref)
 	cancelInspect()
@@ -542,6 +569,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 
 	// A bare clone of a whole repository is the longest subprocess firstpass
 	// runs, and on Windows a credential prompt can stall it indefinitely.
+	p.progress(Event{Stage: StagePreparingWorktree, Ref: ref, Index: idx, Total: total})
 	wctx, cancelPrepare := context.WithTimeout(ctx, p.Cfg.CloneTimeout.D())
 	dir, cleanup, err := p.WTs.Prepare(wctx, ref)
 	cancelPrepare()
@@ -552,7 +580,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	defer cleanup()
 
 	// The pause file is re-read here, not just at sweep start. A sweep can run
-	// for the better part of an hour (three reviews at a twenty-minute
+	// for the better part of two hours (three reviews at a thirty-minute
 	// timeout), and a kill switch for a tool that writes to other people's
 	// pull requests has to take effect on the next review, not the next sweep.
 	// No attempt is counted: a pause is not a failure of this PR.
@@ -589,6 +617,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// cap bounds, so a run of failures cannot make Rev.Run fire for every
 	// candidate in the batch.
 	rep.reviewAttempts++
+	p.progress(Event{Stage: StageReviewStarted, Ref: ref, Index: idx, Total: total})
 	res, rerr := p.Rev.Run(rctx, dir, ref)
 	done := p.now()
 
@@ -635,6 +664,10 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 			note(err)
 		}
 		p.Log.Warn("needs attention", "key", ref.Key(), "err", rerr)
+		p.progress(Event{
+			Stage: StageReviewFinished, Ref: ref, Index: idx, Total: total,
+			Detail: reviewFinishedDetail(string(rec.Outcome), done.Sub(started)),
+		})
 		return dec(ActionNeedsAttention, reason)
 	}
 
@@ -649,6 +682,10 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	}
 	rep.Reviewed++
 	p.Log.Info("reviewed", "key", ref.Key(), "ms", rec.DurationMS, "report", rec.ReportPath)
+	p.progress(Event{
+		Stage: StageReviewFinished, Ref: ref, Index: idx, Total: total,
+		Detail: reviewFinishedDetail(string(rec.Outcome), done.Sub(started)),
+	})
 	return dec(ActionReview, "reviewed")
 }
 
@@ -689,7 +726,7 @@ func (p *Pipeline) ReviewOne(ctx context.Context, ref prref.PRRef, opts Options)
 	// The per-sweep cap needs no adjustment: a replay starts with zero
 	// attempts and Validate forbids a cap of zero, so the gate cannot trip.
 	rep := SweepReport{}
-	return p.handle(ctx, candidate{ref: ref, trigger: "replay"}, &rep, opts), nil
+	return p.handle(ctx, candidate{ref: ref, trigger: "replay"}, &rep, opts, 1, 1), nil
 }
 
 // terminal closes the book on a ref and clears any pending entry for it. In
