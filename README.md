@@ -80,16 +80,33 @@ All three of these must hold, or the re-post is skipped:
    re-post is not consent to that. Every skipped outcome fails for the plainer
    reason that nothing was ever reviewed.
 2. The re-post is a **different chat message** from the one that triggered the
-   recorded review, **and it was posted after that review finished**. The name
-   check alone answers the wrong question. The same message can still be
+   recorded review, **and it was posted later than that message was**. The
+   name check alone answers the wrong question. The same message can still be
    sitting in the fifty-message fetch window on the next sweep, and both a
    `-backfill` and a watermark gap re-offer *older* posts by design — while
    the sweep picks the oldest message carrying a link and the record holds the
    newest one seen. So the names differ, and an ordinary push nobody
-   re-posted would otherwise become a second review. Requiring the post to be
-   newer than the review settles all of it. A PR re-offered from the backlog
-   carries the post that parked it, so a deferred second pass can still
-   retry; one with no post recorded is not a re-post at all.
+   re-posted would otherwise become a second review.
+
+   Comparing the two **post** times settles all of it, and it settles it for a
+   reason that holds whatever the machine's clock says: both timestamps come
+   from the Chat API, so any skew between Google's clock and this laptop's
+   cancels instead of deciding the answer. Comparing a post time against the
+   *review's* time would not — a clock an hour behind is enough to make a post
+   that genuinely predates a review look later than it. A row written before
+   the post time was recorded has nothing to compare and falls back to the
+   review time, exactly as it behaved before.
+
+   A re-post that arrives while its review is still running is refused and not
+   kept: the review's own decision time is checked too, and a post from before
+   it is dropped rather than deferred. That loses a nudge, silently; the next
+   re-post triggers normally. It is the deliberate direction — a missed pass
+   costs someone a second nudge, a spurious pass costs a colleague a duplicate
+   comment set.
+
+   A PR re-offered from the backlog carries the post that parked it, so a
+   deferred second pass can still retry; one with no post recorded is not a
+   re-post at all.
 3. The **live head SHA is not a commit any pass has already reviewed** — not
    merely different from the last one. This is the invariant: no pull request
    is ever reviewed twice for the same commit, because that pass's comments

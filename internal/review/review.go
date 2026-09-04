@@ -232,11 +232,24 @@ func secondPassNote(pp PreviousPass) string {
 	short := ShortSHA(pp.HeadSHA)
 
 	if pp.HeadUnchanged {
-		return "A previous automated pass has already reviewed this pull request at the commit " +
-			"it is still at, and its findings were posted as inline comments on it. Nothing has " +
-			"changed since, so review it in full: this pass was asked for deliberately, and a " +
-			"review that held its findings back because an earlier one had them would say " +
-			"nothing at all.\n\n" +
+		// Incomplete has to be honoured here too, and missing that was the
+		// whole of a real defect: this branch returns before the one below, so
+		// a replay of a needs_attention pull request whose head had not
+		// moved -- the most documented replay there is -- was told that pass's
+		// findings "were posted as inline comments on it". Some are and some
+		// are not, and nothing knows which, which is exactly what the
+		// incomplete wording exists to say.
+		what := "has already reviewed this pull request at the commit it is still at, and its " +
+			"findings were posted as inline comments on it."
+		if pp.Incomplete {
+			what = "began reviewing this pull request at the commit it is still at, and did not " +
+				"finish. Some of its findings may already be posted as inline comments on the " +
+				"pull request and some may not: it was posting them one at a time when it " +
+				"stopped, and firstpass cannot tell how far it got."
+		}
+		return "A previous automated pass " + what + " Nothing has changed since, so review it " +
+			"in full: this pass was asked for deliberately, and a review that held its findings " +
+			"back because an earlier one might have had them would say nothing at all.\n\n" +
 			"Before you post a finding, check whether that comment is already on the pull " +
 			"request, and do not post it again if it is: a second copy of the same comment on " +
 			"the same line spends the author's time twice on one point. Everything else, raise " +

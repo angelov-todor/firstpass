@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -178,35 +179,77 @@ func TestADryRunSecondPassReportDoesNotOverwriteTheFirst(t *testing.T) {
 // Sending the reviewer in believing either extreme is how the duplicate
 // comment set needs_attention exists to warn about actually happens.
 func TestTheNoteForAnIncompletePreviousPassAdmitsTheUncertainty(t *testing.T) {
-	inc := secondPassNote(PreviousPass{HeadSHA: prevSHA, Posted: true, Incomplete: true})
+	// Every shape an incomplete previous pass can take, because the guard has
+	// to hold in all of them. It did not: HeadUnchanged was checked first and
+	// returned, so a replay of a needs_attention pull request whose head had
+	// not moved -- the single most documented replay there is -- was told that
+	// pass's findings "were posted as inline comments on it", the exact
+	// untruth this variant exists to prevent.
+	for _, tc := range []struct {
+		name string
+		pp   PreviousPass
+	}{
+		{"the head has moved on", PreviousPass{HeadSHA: prevSHA, Posted: true, Incomplete: true}},
+		{"the head has not moved", PreviousPass{
+			HeadSHA: prevSHA, Posted: true, Incomplete: true, HeadUnchanged: true,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inc := secondPassNote(tc.pp)
+			assertAdmitsUncertainty(t, inc)
 
+			if strings.Contains(inc, "Do not restate findings from that pass") {
+				t.Errorf("a blanket \"do not restate\" is wrong here: a finding the earlier pass "+
+					"never got to must still be raised:\n%s", inc)
+			}
+			// And it must still say how to avoid the duplicate, or the
+			// uncertainty turns into either a second comment or silence.
+			if !strings.Contains(inc, "check whether that comment is already on the pull request") {
+				t.Errorf("the reviewer must be told how to avoid duplicating a comment that did "+
+					"land:\n%s", inc)
+			}
+			complete := secondPassNote(PreviousPass{
+				HeadSHA: prevSHA, Posted: true, HeadUnchanged: tc.pp.HeadUnchanged,
+			})
+			if inc == complete {
+				t.Error("the note must differ from the one for a pass that finished; otherwise " +
+					"Incomplete is decoration")
+			}
+		})
+	}
+}
+
+// assertAdmitsUncertainty fails unless the note hedges what the earlier pass
+// managed to post.
+//
+// It asserts the hedge positively and refuses the claim by *pattern*, not by
+// one phrasing of it. Grepping for a single sentence is how the unchanged-head
+// variant slipped past: it said "its findings were posted as inline comments"
+// where the guard was looking for "posted its findings as inline comments on
+// it", so the guard held and the claim was made anyway. A future rewording has
+// to keep the hedge or trip one of these.
+func assertAdmitsUncertainty(t *testing.T, note string) {
+	t.Helper()
 	for _, want := range []string{
 		"did not finish",
-		"may already be posted as inline comments",
+		"may already be posted",
 		"and some may not",
 		"cannot tell how far it got",
-		"check whether that comment is already on the pull request",
-		prevSHA[:12],
 	} {
-		if !strings.Contains(inc, want) {
-			t.Errorf("the incomplete note must say %q:\n%s", want, inc)
+		if !strings.Contains(note, want) {
+			t.Errorf("an incomplete pass's note must say %q:\n%s", want, note)
 		}
 	}
-	// It must not make the claim the complete note makes.
-	if strings.Contains(inc, "posted its findings as inline comments on it") {
-		t.Errorf("the incomplete note must not claim the previous pass finished posting:\n%s", inc)
-	}
-	if strings.Contains(inc, "Do not restate findings from that pass") {
-		t.Errorf("a blanket \"do not restate\" is wrong here: a finding the earlier pass never "+
-			"got to must still be raised:\n%s", inc)
-	}
-	// And it must still tell the reviewer to raise what is genuinely missing,
-	// or the uncertainty turns into silence.
-	if !strings.Contains(inc, "raise it") {
-		t.Errorf("the incomplete note must still ask for findings that are not already posted:\n%s", inc)
-	}
-	if inc == secondPassNote(PreviousPass{HeadSHA: prevSHA, Posted: true}) {
-		t.Error("the two notes must differ; otherwise Incomplete is decoration")
+	for _, claim := range []*regexp.Regexp{
+		regexp.MustCompile(`(?i)posted its findings`),
+		regexp.MustCompile(`(?i)findings (?:were|was|are) posted`),
+		regexp.MustCompile(`(?i)findings are (?:already )?on the pull request`),
+		regexp.MustCompile(`(?i)they are already on the pull request`),
+	} {
+		if got := claim.FindString(note); got != "" {
+			t.Errorf("the note claims %q of a pass that did not finish; some of its findings are "+
+				"on the pull request and some are not, and nothing knows which:\n%s", got, note)
+		}
 	}
 }
 

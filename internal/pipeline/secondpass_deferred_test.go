@@ -364,3 +364,72 @@ func TestAReplayAfterNewCommitsSaysTheHeadHasMoved(t *testing.T) {
 			"no pass has reviewed", pp)
 	}
 }
+
+// ---- the other way a pending row could get stuck ----
+
+// A second pass deferred by a transient failure whose re-post then turns out
+// to have nothing new lands in the no-new-commits branch, which is above
+// expirePending -- and on every later sweep the record gate skips the ref
+// before the expiry can run. Without a delete there, the row is immortal: it
+// sits in `firstpass status` for ever, describing work that will never happen.
+//
+// Driven across three sweeps and then a year, because a single sweep cannot
+// tell a row that will be retired from one that never can be.
+func TestARepostWithNothingNewClearsTheDeferredPendingRow(t *testing.T) {
+	repostAt := decidedAt.Add(time.Hour)
+	h := newHarness(t, []chat.Message{
+		postAt(thirdPost, "another look "+prURL("aex-balances", 12), repostAt),
+	})
+	h.seedWatermark(t)
+	seedFirstPass(t, h, reviewedAfterTwoPosts(), newSHA)
+	h.prs.err[secondPassKey] = errors.New("gh: network unreachable")
+
+	// Sweep 1: the re-post defers, so a pending row is parked beside the
+	// existing reviewed record.
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := h.st.Pending(secondPassKey); !ok {
+		t.Fatal("the deferred second pass was not parked at all")
+	}
+
+	// Sweep 2: gh is healthy, the message has scrolled away, and it turns out
+	// the head never moved -- the author pushed nothing after all.
+	h.ch.msgs = nil
+	delete(h.prs.err, secondPassKey)
+	h.prs.info[secondPassKey] = ghprOpen(oldSHA)
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ := decisionFor(rep, secondPassKey)
+	if d.Action != ActionSkip {
+		t.Fatalf("Action = %q (%s), want skip: the recorded commit is still the head",
+			d.Action, d.Reason)
+	}
+	if len(h.rev.ran) != 0 {
+		t.Fatalf("ran = %v", h.rev.ran)
+	}
+	if _, ok, _ := h.st.Pending(secondPassKey); ok {
+		t.Error("the pending row must go: this branch is above expirePending, and the record " +
+			"gate skips the ref on every later sweep, so nothing else will ever retire it")
+	}
+
+	// Sweep 3, and then a year later: nothing is offering the ref and nothing
+	// is left behind.
+	rep3, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep3.Decisions) != 0 {
+		t.Errorf("Decisions = %+v, want none", rep3.Decisions)
+	}
+	h.p.Now = func() time.Time { return decidedAt.AddDate(1, 0, 0) }
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := h.st.Pending(secondPassKey); ok {
+		t.Error("a pending row still there a year later is one nothing can retire")
+	}
+}

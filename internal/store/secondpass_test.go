@@ -205,3 +205,42 @@ func TestDryRunIsRecordedAndAPreExistingRowReadsAsLive(t *testing.T) {
 			"disk: %s", b)
 	}
 }
+
+// A row whose slice disagrees with its own two scalars. No code path writes
+// one -- every pass appends its head to the slice -- so this is a hand-edited
+// database or a future writer that sets one field and forgets another. The
+// function is asked exactly one thing, whether a commit may already carry this
+// tool's comments, and answering it from every commit the row names makes that
+// answer total instead of conditional on an invariant held somewhere else.
+func TestReviewedCommitsIncludesTheScalarsEvenWhenTheSliceDisagrees(t *testing.T) {
+	r := Review{
+		Key: "o/r#1", Outcome: OutcomeReviewed, Pass: 3,
+		ReviewedSHAs:    []string{"aaa"},
+		PreviousHeadSHA: "bbb",
+		HeadSHA:         "ccc",
+	}
+	for _, sha := range []string{"aaa", "bbb", "ccc"} {
+		if !r.HasReviewedCommit(sha) {
+			t.Errorf("HasReviewedCommit(%q) = false; the row names that commit as reviewed, so "+
+				"re-reviewing it would post a second copy of its comments", sha)
+		}
+	}
+	if got := r.ReviewedCommits(); len(got) != 3 {
+		t.Errorf("ReviewedCommits() = %v, want all three the row names", got)
+	}
+}
+
+// And the union does not duplicate: a well-formed row already ends with its
+// two scalars, so the set it reports is unchanged in length and order.
+func TestReviewedCommitsDoesNotDuplicateAWellFormedRow(t *testing.T) {
+	r := Review{
+		Key: "o/r#1", Outcome: OutcomeReviewed, Pass: 3,
+		ReviewedSHAs:    []string{"aaa", "bbb", "ccc"},
+		PreviousHeadSHA: "bbb",
+		HeadSHA:         "ccc",
+	}
+	got := r.ReviewedCommits()
+	if len(got) != 3 || got[0] != "aaa" || got[1] != "bbb" || got[2] != "ccc" {
+		t.Errorf("ReviewedCommits() = %v, want [aaa bbb ccc] exactly once and in order", got)
+	}
+}

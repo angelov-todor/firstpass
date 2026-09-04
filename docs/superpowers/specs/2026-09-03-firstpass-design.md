@@ -52,7 +52,7 @@ Out of scope:
 | Review engine | `claude -p "/code-review --comment"` | Reuses the repo's `CLAUDE.md`, the `dotnet-techne-code-review` skill, the sonarqube MCP, and `/code-review`'s existing inline-comment posting. Go builds no prompt and touches no GitHub comment API. |
 | Checkout | Bare mirror cache plus a throwaway worktree per PR | Never touches the user's working copies in `example-org/`, so a background review cannot disturb an active branch or uncommitted work. |
 | Scope | Every posted PR except ones the user authored | Matches how the space is used. `github_login: angelov-todor`. |
-| Dedupe | Once per commit, on a re-post | The team re-posts when an approval lapses or when they have pushed fixes, so re-posting is the intended re-trigger — but a re-post of the same commit must not earn a second comment set on lines that already carry one. Three conditions, all required: the record's outcome is `reviewed` **and** names the commit it reviewed and when it was decided; the re-post is a different, non-empty chat message **posted after that review finished** (a name comparison alone is not enough — a watermark gap and a `-backfill` both re-offer *older* posts, and the sweep takes the oldest message carrying a link while the record holds the newest, so an ordinary push nobody re-posted would manufacture a review); and the live head SHA is not any commit a pass has already reviewed, tracked as a set in `ReviewedSHAs` because a head force-pushed back to an earlier reviewed commit differs from the last one and must still be refused. `needs_attention` is deliberately excluded — it means a review died mid-post, so comments may be half posted and an automatic retry risks duplicating them; a re-post is not consent to that, `firstpass replay` is. Every skipped outcome is excluded because nothing was ever reviewed, and a reviewed row with no head SHA is excluded because condition 3 cannot be established from a missing field. |
+| Dedupe | Once per commit, on a re-post | The team re-posts when an approval lapses or when they have pushed fixes, so re-posting is the intended re-trigger — but a re-post of the same commit must not earn a second comment set on lines that already carry one. Three conditions, all required: the record's outcome is `reviewed` **and** names the commit it reviewed and when it was decided; the re-post is a different, non-empty chat message **posted later than the message the review was run for** (a name comparison alone is not enough — a watermark gap and a `-backfill` both re-offer *older* posts, and the sweep takes the oldest message carrying a link while the record holds the newest, so an ordinary push nobody re-posted would manufacture a review; and the comparison is post-time to post-time, both from the Chat API, so clock skew between Google and this machine cancels instead of deciding it — comparing a post against the review's own local timestamp let the same bug straight back in. A re-post that lands *during* a review is refused and dropped rather than deferred, silently: a missed pass costs a second nudge, a spurious one costs a colleague a duplicate comment set); and the live head SHA is not any commit a pass has already reviewed, tracked as a set in `ReviewedSHAs` because a head force-pushed back to an earlier reviewed commit differs from the last one and must still be refused. `needs_attention` is deliberately excluded — it means a review died mid-post, so comments may be half posted and an automatic retry risks duplicating them; a re-post is not consent to that, `firstpass replay` is. Every skipped outcome is excluded because nothing was ever reviewed, and a reviewed row with no head SHA is excluded because condition 3 cannot be established from a missing field. |
 | Output | Inline GitHub PR comments | The user's explicit choice, made against a recommendation of local-only. Mitigated by a dry-run default, not by narrowing the choice. |
 | Verdict | An explicit GitHub review on every successfully reviewed PR, decided by the reviewer in one `FIRSTPASS-VERDICT:` line and submitted by firstpass | `/code-review --comment` posts findings and nothing else, so a clean PR produced complete silence — indistinguishable from the tool never having run. It happened for real on a +9/−0 one-file PR. The reviewer decides because firstpass never sees a finding; firstpass submits because that makes the action recorded in the store, visible in `status`, and testable against `runner.Fake` rather than buried in a prompt. |
 | Verdict asymmetry | `approve` for nothing-needing-change; a **COMMENT** review, never request-changes, for anything Critical or Important | An approval clears `reviewDecision`, which takes the PR out of the team's human review queue — acceptable only when there is nothing to change. A comment leaves `reviewDecision` at `REVIEW_REQUIRED`, so a PR with findings stays in the queue and a human still looks. request-changes was rejected outright: it would block a merge and speak for a human who has not read the code yet. |
@@ -166,6 +166,11 @@ interface with a fake, so `pipeline` tests run without subprocesses.
    framing is dropped for a request for a full review, keeping only "check before posting a comment
    that may already be there".
 
+   When the head has not moved *and* the earlier pass did not finish, both apply: the note keeps
+   the uncertainty wording and asks for the full review. Getting that wrong is easy and was got
+   wrong once — the unchanged-head branch returned first and asserted the findings were posted — so
+   the guard asserts the hedge and refuses the claim by pattern rather than by one phrasing of it.
+
    The instruction is a system prompt, not part of the `-p` value: everything after `/code-review`
    there becomes the slash command's `$ARGUMENTS`, which parses an effort level, a `--comment`
    flag and a target, so prose appended to it would at best be dropped and at worst perturb the
@@ -185,13 +190,26 @@ interface with a fake, so `pipeline` tests run without subprocesses.
 - `meta` — `watermark` -> `{messageName, createTime}`. The key is the message **name**
   (`spaces/.../messages/...`), which is stable and unique. `createTime` has ties and clock skew, so
   it serves only as a coarse pagination bound.
-- `reviews` — `owner/repo#n` -> outcome, submitted verdict, head SHA, triggering message, duration,
-  exit code, report path, pass number and previous head SHA. The last two are what a second pass
-  adds: the pass number so `status` can tell a first pass from a later one, and the previous head
-  SHA so the commit whose comments are already on the pull request is not lost when the head SHA is
-  overwritten. Both were added after the tool was in production, so a pre-existing row carries
-  neither: it decodes as pass 0 on the wire and is read through `Review.PassNumber`, which reports
-  the first pass it was. "Pass 0" is a state no code ever means.
+- `reviews` — `owner/repo#n` -> outcome, submitted verdict, head SHA, triggering message,
+  `triggerTime`, duration, exit code, report path, and five fields the second pass adds:
+  - `pass` — which pass this was, so `status` can tell a first from a later one. Read through
+    `Review.PassNumber`: a pre-existing row has no such field, decodes as 0, and reports 1, because
+    "pass 0" is a state no code ever means.
+  - `previousHeadSHA` — the commit the pass before this one reviewed, so the commit whose comments
+    are already on the pull request is not lost when the head SHA is overwritten. It is the commit
+    the reviewer is told about, and it is what makes a pre-existing row's commit set derivable.
+  - `reviewedSHAs` — **every** commit a pass has reviewed, oldest first. The dedupe asks the set,
+    not the last entry: a head force-pushed back to an earlier reviewed commit differs from
+    `headSHA` and must still be refused. Empty on a pre-existing row, where `ReviewedCommits`
+    derives it from the two SHAs above.
+  - `dryRun` — this pass posted nothing, because `dry_run` withholds `--comment`. The next pass
+    reads it: a reviewer told that an earlier pass "posted its findings" when it did not would
+    suppress every finding for no reason. Absent on a pre-existing row, which reads as live — the
+    safe direction, since assuming a pass posted nothing when it did is what duplicates comments.
+  - `triggerTime` — when the triggering chat message was posted, as the Chat API reported it. The
+    dedupe compares it against the *next* post's time, so both values come from one clock and any
+    skew between Google's and the local machine's cancels. Absent on a pre-existing row, which
+    falls back to comparing against `decidedAt` as it did before.
 - `pending` — `owner/repo#n` -> `{firstSeen, attempts, lastAttempt, lastReason, lastPausedAt,
   triggerMessage, triggerTime}`. The last two are the park's provenance, restored onto the candidate
   when the ref is re-offered: without them a deferred ref came back anonymous, so a re-post the
