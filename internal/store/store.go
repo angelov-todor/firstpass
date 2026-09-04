@@ -62,6 +62,25 @@ type Review struct {
 	Outcome        Outcome `json:"outcome"`
 	HeadSHA        string  `json:"head_sha,omitempty"`
 	TriggerMessage string  `json:"trigger_message,omitempty"`
+	// TriggerTime is when that chat message was posted, as the Chat API
+	// reported it. It exists so "was this post made after the one we last
+	// reviewed for" can be asked of two values from the *same* clock.
+	//
+	// Comparing a post time against DecidedAt crosses clock domains: Google
+	// timestamps the message, the local machine timestamps the decision. A
+	// laptop clock an hour behind is enough to make a post that genuinely
+	// predates a review compare as later than it, which turns an ordinary push
+	// into an unrequested second pass -- and a watermark gap holds the
+	// watermark, so the whole window is re-offered every sweep until the gap
+	// is cleared. Post against post, the skew cancels.
+	//
+	// A row written before this field decodes as zero, which is the signal to
+	// fall back to the DecidedAt comparison: an existing row then behaves
+	// exactly as it does today, which is the conservative direction.
+	//
+	// No omitempty: it is inert on a struct type, so the encoder emits the
+	// zero time either way. See LastPausedAt on Pending.
+	TriggerTime time.Time `json:"trigger_time"`
 	// No omitempty on these two: it is inert on a struct type, so the encoder
 	// emits the zero time either way. See LastPausedAt below.
 	StartedAt  time.Time `json:"started_at"`
@@ -136,16 +155,30 @@ type Review struct {
 // letting its first pass's commit back through. That derivation is why
 // PreviousHeadSHA is kept despite being redundant on new rows.
 func (r Review) ReviewedCommits() []string {
-	if len(r.ReviewedSHAs) > 0 {
-		return r.ReviewedSHAs
+	out := make([]string, 0, len(r.ReviewedSHAs)+2)
+	add := func(sha string) {
+		if sha == "" {
+			return
+		}
+		for _, s := range out {
+			if s == sha {
+				return
+			}
+		}
+		out = append(out, sha)
 	}
-	var out []string
-	if r.PreviousHeadSHA != "" {
-		out = append(out, r.PreviousHeadSHA)
+	for _, sha := range r.ReviewedSHAs {
+		add(sha)
 	}
-	if r.HeadSHA != "" {
-		out = append(out, r.HeadSHA)
-	}
+	// Unioned in rather than trusted to be in the slice already. On a
+	// well-formed row they are its last two entries and this changes nothing;
+	// on a row where they disagree with it -- a hand-edited database, or a
+	// future writer that sets one and forgets the other -- the answer is still
+	// every commit the row names, so the function is total instead of relying
+	// on an invariant held somewhere else. That is worth a line: the one thing
+	// it is asked is whether a commit already carries this tool's comments.
+	add(r.PreviousHeadSHA)
+	add(r.HeadSHA)
 	return out
 }
 

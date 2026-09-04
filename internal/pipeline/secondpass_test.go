@@ -156,8 +156,9 @@ func TestARepostWithNoNewCommitsIsSkippedAndOnlyTheTriggerIsUpdated(t *testing.T
 	}
 	want := seeded
 	want.TriggerMessage = rePost
+	want.TriggerTime = time.Date(2026, 9, 3, 9, 0, 0, 0, time.UTC)
 	if !reviewsEqual(rec, want) {
-		t.Errorf("record =\n %+v\nwant only TriggerMessage changed:\n %+v", rec, want)
+		t.Errorf("record =\n %+v\nwant only the trigger changed:\n %+v", rec, want)
 	}
 }
 

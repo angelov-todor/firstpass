@@ -150,8 +150,9 @@ func TestAHeadForcePushedBackToAnEarlierReviewedCommitIsNotReviewedAgain(t *test
 			// re-inspected every sweep; nothing else about the record does.
 			want := tc.record
 			want.TriggerMessage = thirdPost
+			want.TriggerTime = decidedAt.Add(time.Hour)
 			if rec, _, _ := h.st.Review(secondPassKey); !reviewsEqual(rec, want) {
-				t.Errorf("record =\n %+v\nwant only TriggerMessage changed:\n %+v", rec, want)
+				t.Errorf("record =\n %+v\nwant only the trigger changed:\n %+v", rec, want)
 			}
 		})
 	}
@@ -161,3 +162,98 @@ func TestAHeadForcePushedBackToAnEarlierReviewedCommitIsNotReviewedAgain(t *test
 // now, so it is no longer comparable with ==, and a helper is better than
 // letting each assertion pick its own subset of fields to check.
 func reviewsEqual(a, b store.Review) bool { return reflect.DeepEqual(a, b) }
+
+const fourthSHA = "9876543210fedcba9876543210fedcba98765432"
+
+// threePassRecord is a pull request reviewed three times: oldSHA, then
+// newSHA, then thirdSHA. The first commit is deliberately *not* the
+// last-but-one, which is what twoPassRecord could not express -- there
+// PreviousHeadSHA and the earliest reviewed commit are the same string, so a
+// test built on it cannot tell "refuses any reviewed commit" from "refuses the
+// last two".
+func threePassRecord() store.Review {
+	r := twoPassRecord()
+	r.HeadSHA = thirdSHA
+	r.PreviousHeadSHA = newSHA
+	r.ReviewedSHAs = []string{oldSHA, newSHA, thirdSHA}
+	r.Pass = 3
+	return r
+}
+
+// The set check, at the call site, with a record deep enough to discriminate.
+// A head force-pushed back to the *first* of three reviewed commits is neither
+// HeadSHA nor PreviousHeadSHA, so an implementation that checked those two
+// scalars would review it again -- blocker 1 exactly, one pass later.
+func TestAHeadForcePushedBackPastTheLastTwoCommitsIsNotReviewedAgain(t *testing.T) {
+	seeded := threePassRecord()
+	for _, tc := range []struct {
+		name string
+		live string
+	}{
+		// The case the two-scalar implementation cannot see.
+		{"the first of three reviewed commits", oldSHA},
+		// The two it can, kept so the test also covers the whole set.
+		{"the middle one", newSHA},
+		{"the most recent one", thirdSHA},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, []chat.Message{
+				postAt(thirdPost, "reverted, please look again "+prURL("aex-balances", 12),
+					decidedAt.Add(time.Hour)),
+			})
+			h.seedWatermark(t)
+			seedFirstPass(t, h, seeded, tc.live)
+
+			rep, err := h.p.Sweep(context.Background(), Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, _ := decisionFor(rep, secondPassKey)
+			if d.Action != ActionSkip {
+				t.Fatalf("Action = %q (%s), want skip: %q has already been reviewed and that "+
+					"pass's comments are on those lines", d.Action, d.Reason, tc.live)
+			}
+			if len(h.rev.ran) != 0 {
+				t.Fatalf("ran = %v; a pull request must never be reviewed twice for the same "+
+					"commit, however many passes ago that was", h.rev.ran)
+			}
+			if len(h.prs.submitted) != 0 {
+				t.Errorf("submitted = %+v; nothing was reviewed", h.prs.submitted)
+			}
+			want := seeded
+			want.TriggerMessage = thirdPost
+			want.TriggerTime = decidedAt.Add(time.Hour)
+			if rec, _, _ := h.st.Review(secondPassKey); !reviewsEqual(rec, want) {
+				t.Errorf("record =\n %+v\nwant only the trigger changed:\n %+v", rec, want)
+			}
+		})
+	}
+}
+
+// The positive control for the test above: after three passes a genuinely new
+// commit is still reviewed. Without it, "refuse every re-post once a pull
+// request has two passes" would satisfy every skip assertion on this branch.
+func TestAFourthPassReviewsAGenuinelyNewCommit(t *testing.T) {
+	h := newHarness(t, []chat.Message{
+		postAt(thirdPost, "once more "+prURL("aex-balances", 12), decidedAt.Add(time.Hour)),
+	})
+	h.seedWatermark(t)
+	seedFirstPass(t, h, threePassRecord(), fourthSHA)
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ := decisionFor(rep, secondPassKey)
+	if d.Action != ActionReview {
+		t.Fatalf("Action = %q (%s), want review: %q has never been reviewed", d.Action, d.Reason, fourthSHA)
+	}
+	rec, _, _ := h.st.Review(secondPassKey)
+	if rec.Pass != 4 {
+		t.Errorf("Pass = %d, want 4", rec.Pass)
+	}
+	got := rec.ReviewedCommits()
+	if len(got) != 4 || got[0] != oldSHA || got[3] != fourthSHA {
+		t.Errorf("ReviewedCommits() = %v, want all four in order", got)
+	}
+}

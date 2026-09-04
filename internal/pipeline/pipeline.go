@@ -193,9 +193,32 @@ func inFlightDetail(ref prref.PRRef) string {
 // pending is keyed by pull request rather than by post, so an empty trigger is
 // never a re-post either.
 func secondPassDue(prev store.Review, trigger string, postedAt time.Time) bool {
-	return prev.Outcome == store.OutcomeReviewed && prev.HeadSHA != "" &&
-		trigger != "" && trigger != prev.TriggerMessage &&
-		!prev.DecidedAt.IsZero() && postedAt.After(prev.DecidedAt)
+	if prev.Outcome != store.OutcomeReviewed || prev.HeadSHA == "" {
+		return false
+	}
+	if trigger == "" || trigger == prev.TriggerMessage {
+		return false
+	}
+	// "Did this post arrive after the review finished." One clock timestamps
+	// the post and another the decision, so this cannot carry the ordering on
+	// its own -- see below -- but for this question the skew does not matter:
+	// it decides only whether a post that landed around the review counts, and
+	// either answer costs at most a deferred nudge.
+	if prev.DecidedAt.IsZero() || !postedAt.After(prev.DecidedAt) {
+		return false
+	}
+	// "Did this post come after the one we reviewed for." Both values are
+	// posting times reported by the Chat API, so any skew between Google's
+	// clock and this machine's cancels instead of deciding the answer.
+	//
+	// A row written before TriggerTime existed has nothing to compare, so it
+	// falls back to the DecidedAt check above and behaves exactly as it does
+	// today. Conservative: it is the pre-existing behaviour, not a new
+	// permission.
+	if prev.TriggerTime.IsZero() {
+		return true
+	}
+	return postedAt.After(prev.TriggerTime)
 }
 
 // noteRetrigger records that a re-post was seen and had nothing new in it, by
@@ -208,13 +231,28 @@ func secondPassDue(prev store.Review, trigger string, postedAt time.Time) bool {
 // every sweep for as long as it stayed in the fetch window.
 //
 // Print-only writes nothing, like every other write in handle.
-func (p *Pipeline) noteRetrigger(prev store.Review, trigger string, opts Options) error {
+func (p *Pipeline) noteRetrigger(prev store.Review, c candidate, opts Options) error {
 	if opts.PrintOnly {
 		return nil
 	}
-	prev.TriggerMessage = trigger
+	// Both halves of the trigger, always together: they are one fact about one
+	// post, and a name from the new post beside a time from the old one is a
+	// pair that describes no post at all -- and the time is half of the test
+	// that decides the next re-post.
+	prev.TriggerMessage = c.trigger
+	prev.TriggerTime = c.triggerAt
 	if err := p.Store.PutReview(prev); err != nil {
 		p.Log.Error("put review", "key", prev.Key, "err", err)
+		return err
+	}
+	// The pending row goes too. A second pass deferred by a transient failure
+	// parks one, and if its re-post then turns out to have nothing new this
+	// branch is where it lands -- above expirePending, and on every later
+	// sweep the record gate skips it before the expiry can ever run. Left
+	// behind, the row sits in `firstpass status` for good. This is the same
+	// leak the parked provenance fixed, reached by a different branch.
+	if err := p.Store.DeletePending(prev.Key); err != nil {
+		p.Log.Error("delete pending", "key", prev.Key, "err", err)
 		return err
 	}
 	return nil
@@ -810,7 +848,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		// The trigger is updated so the same re-post is not re-inspected on
 		// every sweep for as long as it sits in the fetch window. Nothing else
 		// on the record moves: nothing else happened.
-		note(p.noteRetrigger(*previous, c.trigger, opts))
+		note(p.noteRetrigger(*previous, c, opts))
 		if info.HeadSHA == previous.HeadSHA {
 			return dec(ActionSkip, "re-posted with no new commits since "+
 				review.ShortSHA(previous.HeadSHA))
@@ -870,6 +908,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		Outcome:        store.OutcomeInFlight,
 		HeadSHA:        info.HeadSHA,
 		TriggerMessage: c.trigger,
+		TriggerTime:    c.triggerAt,
 		StartedAt:      started,
 		Pass:           1,
 		ReviewedSHAs:   []string{info.HeadSHA},
