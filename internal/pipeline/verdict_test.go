@@ -361,6 +361,82 @@ func TestFailedVerdictSubmissionStaysReviewed(t *testing.T) {
 	}
 }
 
+// replayVerdictHarness is the same wiring as verdictHarness, but with no chat
+// message: ReviewOne is handed the ref directly, the way cmdReplay does.
+func replayVerdictHarness(t *testing.T, v review.Verdict, live bool) (*harness, *runner.Fake) {
+	t.Helper()
+	h := newHarness(t, nil)
+	f := ghFake(runner.Result{})
+	h.p.PRs = ghpr.New(f, "gh")
+	h.rev.result = review.Result{Verdict: v}
+	h.cfg.DryRun = !live
+	h.apply()
+	return h, f
+}
+
+// `replay -live` is the one path where submitting a verdict on a named
+// colleague's pull request is an intentional act, so it gets its own test
+// rather than relying on ReviewOne sharing handle with the sweep.
+func TestLiveReplaySubmitsExactlyOneVerdict(t *testing.T) {
+	h, f := replayVerdictHarness(t, review.VerdictApprove, true)
+
+	d, err := h.p.ReviewOne(context.Background(), replayRef, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Action != ActionReview {
+		t.Fatalf("Action = %q (%s), want review", d.Action, d.Reason)
+	}
+
+	calls := ghReviewCalls(f)
+	if len(calls) != 1 {
+		t.Fatalf("want exactly one gh pr review call, got %+v", calls)
+	}
+	want := []string{"pr", "review", "12", "--repo", "example-org/aex-balances",
+		"--approve", "--body", verdictBodyApprove}
+	if !slices.Equal(calls[0].Args, want) {
+		t.Errorf("Args = %q,\nwant %q", calls[0].Args, want)
+	}
+
+	rec, ok, err := h.st.Review(replayRef.Key())
+	if err != nil || !ok {
+		t.Fatalf("no review record (ok=%v err=%v)", ok, err)
+	}
+	if rec.Outcome != store.OutcomeReviewed {
+		t.Errorf("Outcome = %q, want reviewed", rec.Outcome)
+	}
+	if rec.Verdict != store.VerdictApproved {
+		t.Errorf("Verdict = %q, want %q", rec.Verdict, store.VerdictApproved)
+	}
+}
+
+// A replay respects dry_run unless -live is passed, which is what makes
+// replaying to inspect the output safe. That has to cover the verdict too.
+func TestDryRunReplaySubmitsNoVerdict(t *testing.T) {
+	for _, v := range []review.Verdict{review.VerdictApprove, review.VerdictFindings} {
+		t.Run(string(v), func(t *testing.T) {
+			h, f := replayVerdictHarness(t, v, false)
+
+			if _, err := h.p.ReviewOne(context.Background(), replayRef, Options{}); err != nil {
+				t.Fatal(err)
+			}
+			if calls := ghReviewCalls(f); len(calls) != 0 {
+				t.Fatalf("a dry-run replay must submit nothing, got %+v", calls)
+			}
+			rec, ok, _ := h.st.Review(replayRef.Key())
+			if !ok {
+				t.Fatal("no review record")
+			}
+			if rec.Verdict != store.VerdictNone {
+				t.Errorf("Verdict = %q; nothing was submitted, so nothing may be recorded", rec.Verdict)
+			}
+			if !strings.Contains(rec.Detail, "would have been "+string(v)) {
+				t.Errorf("the record must say what the verdict would have been, got %q", rec.Detail)
+			}
+		})
+	}
+}
+
 // print-only queries GitHub but must never write anything, verdict included.
 func TestPrintOnlySubmitsNoVerdict(t *testing.T) {
 	h, f := verdictHarness(t, review.VerdictApprove, true, runner.Result{})
