@@ -20,7 +20,7 @@ import (
 )
 
 func ref(n int) prref.PRRef {
-	return prref.PRRef{Owner: "astrabit-cpt", Repo: "aex-margin-service", Number: n}
+	return prref.PRRef{Owner: "example-org", Repo: "aex-balances", Number: n}
 }
 
 // TestProgressRendererWritesToStderrNotStdout is the load-bearing safety
@@ -311,7 +311,7 @@ func TestSlogProgressHandlerLogsStructuredFields(t *testing.T) {
 	h(pipeline.Event{Stage: pipeline.StageInspecting, Ref: ref(197), Index: 5, Total: 70})
 
 	out := buf.String()
-	for _, want := range []string{"level=INFO", "stage=inspecting", "pr=astrabit-cpt/aex-margin-service#197", "index=5", "total=70"} {
+	for _, want := range []string{"level=INFO", "stage=inspecting", "pr=example-org/aex-balances#197", "index=5", "total=70"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log output missing %q, got %q", want, out)
 		}
