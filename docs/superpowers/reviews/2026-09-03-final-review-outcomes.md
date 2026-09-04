@@ -2,7 +2,8 @@
 
 **Date:** 2026-09-03
 **Branch:** `firstpass-impl`
-**Status:** implementation complete and reviewed; two items need the owner's decision before a live run
+**Status:** implementation complete and reviewed. Decision 1 has since been narrowed by the owner
+and decision 2 is closed — see the notes under each. A live run has still never happened.
 
 All twelve planned tasks were implemented, each individually reviewed for spec compliance and
 quality, with eight fix rounds. A whole-branch review then found defects that existed only in the
@@ -48,7 +49,28 @@ Nothing in this area was changed by the fix wave: `ClaudeArgs` is byte-identical
 specified, deliberately, because tightening it could break the review's ability to post at all and
 that is the owner's call.
 
-## Open decision 2 — the review stage has never been executed
+### Owner's decision, 2026-09-04 — NARROWED, not closed
+
+The owner has accepted the subprocess **reading** across their workspace, on the grounds that wider
+context produces better reviews. That is well-founded: in the first real dry run the reviewer opened
+a file in a *different* repository to check the premise of the change it was reviewing, and its
+findings were stronger for it. Mitigation 3 (`--add-dir` restrictions) is therefore declined.
+
+What that decision does **not** cover, and what remains open:
+
+- **Writing.** The subprocess inherits the environment, including a `GITHUB_TOKEN` whose scopes
+  include `admin:org` and `admin:enterprise`. Reading being desirable places no limit on pushing,
+  commenting, or deleting anywhere that token reaches — including repositories outside
+  `allow_owners`, which gates only which PRs firstpass *chooses* to review.
+- **Injection.** The reviewed checkout is the pull request author's code. On a fork PR that author is
+  outside the org, and the checkout may carry its own `CLAUDE.md`, `.claude/settings.json` or
+  `.claude/skills/*`, which a headless agent with no human at the prompt reads as instructions.
+
+Mitigations 1, 2 and 4 above still stand unaddressed, and mitigation 2 (`--settings`) is the cheapest
+answer to the injection half specifically. Accepted knowingly for now; recorded here so the next
+reader does not mistake the narrowing for a clean bill of health.
+
+## Decision 2 — CLOSED: the review stage has now been executed
 
 The operator checkpoint that ran was `scan -print-only -backfill 200`, which validated PR extraction
 against 200 real messages (70 references found, independently cross-checked as exactly right) but
@@ -60,10 +82,19 @@ detached HEAD, no `refs/remotes/origin/*`, and an empty `git diff`. Both halves 
 `8c49966` — the prompt now names the PR (`/code-review <url>`), and the mirror fetches branches into
 remote-tracking refs so a diff base resolves.
 
-**Those fixes are structurally verified but not end-to-end verified.** Confirming them means running
-a real `claude` review over a checkout, which is exactly the action open decision 1 makes risky. So
-the sequence is: settle decision 1, then run one dry-run review and read the report, then consider
-`dry_run: false`.
+**Both fixes are now confirmed end to end.** On 2026-09-04 the owner ran a dry-run
+`replay` of a real 3-commit pull request. It completed in 12m15s and produced a substantive report:
+the reviewer saw the actual diff (`master...HEAD`, 3 commits), which proves both halves — the PR URL
+reached `/code-review`, and the mirror's remote-tracking refs gave it a resolvable base. It returned
+four findings, each with a file:line and a concrete mechanism.
+
+Two consequences were folded back into the code. `review_timeout` went 20m → 30m, because 12m15s is
+61% of the old budget and a timeout becomes `needs_attention` that is never retried. And the run was
+silent for its whole 12 minutes while holding the store lock, so `status` could not be run either —
+which produced the progress-output feature.
+
+**Still unverified: posting.** A live run has never happened, so `/code-review --comment` finding the
+pull request and writing to it is the one part of the path still taken on faith.
 
 The plan's Task 11 Step 7 was a "read a real dry-run report" checkpoint. It was not run, and that
 omission is why the composition defect survived twelve per-task reviews: in the review package's

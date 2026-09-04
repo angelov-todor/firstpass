@@ -102,3 +102,20 @@ func TestDoctorCheckHonoursTheOverallDeadline(t *testing.T) {
 		t.Fatalf("the overall bound must still apply, got %v", err)
 	}
 }
+
+// TestDoctorOverallBudgetExceedsTheSumOfItsChecks pins the invariant that
+// doctorOverallTimeout must leave headroom over every per-check budget added
+// together. It was violated once: raising doctorCheckTimeout to 30s against a
+// 2m overall made 4 x 30s exactly the whole budget, so the last check to run
+// -- google chat reachable, the one fatalChatBanner sends the operator to --
+// lost its deadline to the pre-check work and failed on the context instead of
+// on its merits. A fifth check, or a raised per-check value, would silently
+// reintroduce that; this test makes it a red build instead.
+func TestDoctorOverallBudgetExceedsTheSumOfItsChecks(t *testing.T) {
+	const boundedChecks = 4 // git, claude, gh auth, google chat
+	if sum := boundedChecks * doctorCheckTimeout; doctorOverallTimeout <= sum {
+		t.Fatalf("doctorOverallTimeout = %s, but %d checks at %s each need %s: "+
+			"the last check would inherit a shortened deadline and misreport",
+			doctorOverallTimeout, boundedChecks, doctorCheckTimeout, sum)
+	}
+}

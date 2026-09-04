@@ -33,16 +33,18 @@ func (o Outcome) Terminal() bool { return o != OutcomeInFlight }
 
 // Review is the record for a pull request firstpass has acted on.
 type Review struct {
-	Key            string    `json:"key"`
-	Outcome        Outcome   `json:"outcome"`
-	HeadSHA        string    `json:"head_sha,omitempty"`
-	TriggerMessage string    `json:"trigger_message,omitempty"`
-	StartedAt      time.Time `json:"started_at,omitempty"`
-	DecidedAt      time.Time `json:"decided_at,omitempty"`
-	DurationMS     int64     `json:"duration_ms,omitempty"`
-	ExitCode       int       `json:"exit_code,omitempty"`
-	ReportPath     string    `json:"report_path,omitempty"`
-	Detail         string    `json:"detail,omitempty"`
+	Key            string  `json:"key"`
+	Outcome        Outcome `json:"outcome"`
+	HeadSHA        string  `json:"head_sha,omitempty"`
+	TriggerMessage string  `json:"trigger_message,omitempty"`
+	// No omitempty on these two: it is inert on a struct type, so the encoder
+	// emits the zero time either way. See LastPausedAt below.
+	StartedAt  time.Time `json:"started_at"`
+	DecidedAt  time.Time `json:"decided_at"`
+	DurationMS int64     `json:"duration_ms,omitempty"`
+	ExitCode   int       `json:"exit_code,omitempty"`
+	ReportPath string    `json:"report_path,omitempty"`
+	Detail     string    `json:"detail,omitempty"`
 }
 
 // Pending is a pull request deferred to a later sweep.
