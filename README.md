@@ -118,14 +118,23 @@ Read this before running anything other than `doctor` or `scan -print-only`.
   prompt will read as instructions. See
   `docs/superpowers/reviews/2026-09-03-final-review-outcomes.md` for the
   full analysis and the mitigations that were considered but not applied.
-- **Posting has never been exercised.** Parsing and filtering were checked
-  against 200 messages of real chat history, and one dry-run `replay` has
-  been run end to end: it produced a substantive report in 12m15s, which is
-  why `review_timeout` defaults to 30m. What has *not* happened is a live
-  run — nothing has ever been posted to a pull request by this tool. Read
-  your own dry-run report (`scan -backfill N`, or `replay <url>`, without
-  `-live`) and satisfy yourself you would be happy for it to appear on a
-  colleague's PR before ever setting `dry_run: false`. No review verdict has
-  ever been submitted either: the report's "the verdict would have been" line
-  is there so you can watch firstpass decide, over several dry runs, before it
-  decides for real.
+- **Inline comments are exercised; the verdict is not.** Parsing and
+  filtering were checked against 200 messages of real chat history, and a
+  dry-run `replay` produced a substantive report in 12m15s, which is why
+  `review_timeout` defaults to 30m. Comments have since been posted live: on
+  a 7-file, +539/−12 pull request firstpass left three inline comments,
+  including one that falsified a security claim in the PR's own description,
+  one `IsSuccessStatusCode` trap where a 2xx with an undeserialisable body
+  silently skips an audit-trail write, and one null dereference whose broad
+  `catch` then logged the opposite of what had happened. That is the standard
+  to hold it to, and it is the reason to read your own dry-run report (`scan
+  -backfill N`, or `replay <url>`, without `-live`) before setting `dry_run:
+  false`.
+
+  What has **not** been exercised is the verdict. No review verdict has ever
+  been submitted by this tool: the code path is new, and no real `claude` run
+  has yet been observed printing the `FIRSTPASS-VERDICT:` line the reviewer is
+  asked for. Until you have seen a dry-run report say "the verdict would have
+  been" with a value you agree with — several times — treat the verdict as
+  unproven, and remember that the approve case posts a real approval under
+  your identity.

@@ -57,6 +57,24 @@ allow_owners: []
 # `watch` without dry_run: true) means REAL comments get posted to REAL pull
 # requests, under your GitHub identity. Do this only after reading a dry-run
 # report and confirming you'd be comfortable posting it.
+#
+# Live also submits a REAL GitHub REVIEW on every pull request it finishes
+# reviewing, under your identity:
+#
+#   * nothing needing change (no findings, or only minor nits) -> an
+#     APPROVAL. That sets reviewDecision=APPROVED, which can take the pull
+#     request out of your team's human review queue -- a machine approval
+#     standing in for a human one. This is the part to think hardest about
+#     before going live.
+#   * anything Critical or Important -> a COMMENT-type review, deliberately
+#     not request-changes. A comment leaves reviewDecision at
+#     REVIEW_REQUIRED, so the pull request stays in the queue and a human
+#     still looks; request-changes would block a merge and speak for a
+#     reviewer who has not read the code.
+#
+# Every review body says in its first sentence that it is machine-written. A
+# dry run submits no verdict at all and writes what it would have been into
+# the report, so you can watch firstpass decide before it decides for real.
 dry_run: true
 
 # ---------------------------------------------------------------------------
