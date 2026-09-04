@@ -53,7 +53,25 @@ func cmdStatus(args []string) error {
 // particular "reviewed / approved" (submitted) must not be confusable with
 // "reviewed / no verdict" (a dry run, or a submission that failed -- Detail
 // says which) or "reviewed / verdict unknown" (the reviewer never said).
+//
+// A review that was not the first pass over its pull request says so as well.
+// Comments arriving twice on one pull request is the thing the operator will
+// want explained, and this is the answer. Only a later pass is annotated:
+// almost every row is a first pass, and saying "pass 1" on all of them would
+// bury the one row that matters. A pre-existing row carries no pass number at
+// all and reads as the first pass it was, never as "pass 0" -- see
+// store.Review.PassNumber.
 func outcomeCell(r store.Review) string {
+	cell := verdictCell(r)
+	if r.Outcome == store.OutcomeReviewed && r.PassNumber() > 1 {
+		// Only a review has a pass: a skipped or expired row was never
+		// reviewed at all.
+		cell += fmt.Sprintf(" (pass %d)", r.PassNumber())
+	}
+	return cell
+}
+
+func verdictCell(r store.Review) string {
 	switch {
 	case r.Verdict == store.VerdictApproved:
 		return string(r.Outcome) + " / approved"

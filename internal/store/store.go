@@ -62,6 +62,25 @@ type Review struct {
 	Outcome        Outcome `json:"outcome"`
 	HeadSHA        string  `json:"head_sha,omitempty"`
 	TriggerMessage string  `json:"trigger_message,omitempty"`
+	// TriggerTime is when that chat message was posted, as the Chat API
+	// reported it. It exists so "was this post made after the one we last
+	// reviewed for" can be asked of two values from the *same* clock.
+	//
+	// Comparing a post time against DecidedAt crosses clock domains: Google
+	// timestamps the message, the local machine timestamps the decision. A
+	// laptop clock an hour behind is enough to make a post that genuinely
+	// predates a review compare as later than it, which turns an ordinary push
+	// into an unrequested second pass -- and a watermark gap holds the
+	// watermark, so the whole window is re-offered every sweep until the gap
+	// is cleared. Post against post, the skew cancels.
+	//
+	// A row written before this field decodes as zero, which is the signal to
+	// fall back to the DecidedAt comparison: an existing row then behaves
+	// exactly as it does today, which is the conservative direction.
+	//
+	// No omitempty: it is inert on a struct type, so the encoder emits the
+	// zero time either way. See LastPausedAt on Pending.
+	TriggerTime time.Time `json:"trigger_time"`
 	// No omitempty on these two: it is inert on a struct type, so the encoder
 	// emits the zero time either way. See LastPausedAt below.
 	StartedAt  time.Time `json:"started_at"`
@@ -75,6 +94,122 @@ type Review struct {
 	// verdict must look exactly like the reviewed rows already in the
 	// database from before verdicts existed.
 	Verdict Verdict `json:"verdict,omitempty"`
+
+	// Pass counts the reviews firstpass has run on this pull request: 1 for a
+	// first pass, 2 for the second pass a re-post with new commits triggers,
+	// and so on. Read it through PassNumber, never directly: the production
+	// database is full of reviewed rows written before this field existed,
+	// and every one of them was a first pass.
+	//
+	// omitempty for the same reason as Verdict: a pass of 0 is a state no
+	// code ever means, so keeping it off disk makes a pre-existing row and a
+	// freshly written first pass the same shape to read.
+	Pass int `json:"pass,omitempty"`
+	// PreviousHeadSHA is the commit the pass before this one reviewed, so a
+	// second pass does not lose the commit whose comments are already on the
+	// pull request. Empty on a first pass.
+	//
+	// It is redundant with the last-but-one entry of ReviewedSHAs and is kept
+	// anyway: it is what makes a row written before ReviewedSHAs existed
+	// decode into a usable set (see ReviewedCommits), and the reviewer is told
+	// about this one commit specifically rather than about the whole set.
+	PreviousHeadSHA string `json:"previous_head_sha,omitempty"`
+	// DryRun says this pass ran with dry_run set, and therefore posted
+	// nothing: /code-review was invoked without --comment, so its findings
+	// went to a report on disk and never reached the pull request.
+	//
+	// A later pass needs it, because the reviewer is told that the pass before
+	// it "posted its findings as inline comments" and asked not to restate
+	// them. After a dry run both halves are false, and the second half would
+	// suppress every finding for no reason -- on the very report that is the
+	// documented gate before going live.
+	//
+	// Absent on every row written before this field existed, which reads as
+	// live. That is the safe direction: assuming a pass posted nothing when it
+	// did is what puts a second copy of every comment on a colleague's pull
+	// request, and the reverse merely asks for a full review.
+	DryRun bool `json:"dry_run,omitempty"`
+	// ReviewedSHAs is every commit a pass of this review has reviewed, oldest
+	// first, with the current HeadSHA last. Read it through ReviewedCommits.
+	//
+	// It exists because HeadSHA alone is the *last* pass's commit, and "no
+	// pull request is reviewed twice for the same commit" is a statement about
+	// all of them. A head force-pushed back to any earlier reviewed commit
+	// compares unequal to HeadSHA, so a single-scalar check would review it
+	// again and post a second copy of that pass's comments onto the very lines
+	// that already carry them -- the headline invariant failing in exactly the
+	// way it exists to prevent.
+	//
+	// It grows by one 40-character string per pass, and a pass needs a re-post
+	// with new commits, so the growth is bounded by how often a team re-posts
+	// one pull request. omitempty for the same reason as Pass: a row with
+	// nothing to say must look like the rows already on disk.
+	ReviewedSHAs []string `json:"reviewed_shas,omitempty"`
+}
+
+// ReviewedCommits is every commit a pass of this review has reviewed, oldest
+// first.
+//
+// A row written before ReviewedSHAs existed has the set derived from the two
+// SHAs it does carry, so an existing record behaves correctly rather than
+// letting its first pass's commit back through. That derivation is why
+// PreviousHeadSHA is kept despite being redundant on new rows.
+func (r Review) ReviewedCommits() []string {
+	out := make([]string, 0, len(r.ReviewedSHAs)+2)
+	add := func(sha string) {
+		if sha == "" {
+			return
+		}
+		for _, s := range out {
+			if s == sha {
+				return
+			}
+		}
+		out = append(out, sha)
+	}
+	for _, sha := range r.ReviewedSHAs {
+		add(sha)
+	}
+	// Unioned in rather than trusted to be in the slice already. On a
+	// well-formed row they are its last two entries and this changes nothing;
+	// on a row where they disagree with it -- a hand-edited database, or a
+	// future writer that sets one and forgets the other -- the answer is still
+	// every commit the row names, so the function is total instead of relying
+	// on an invariant held somewhere else. That is worth a line: the one thing
+	// it is asked is whether a commit already carries this tool's comments.
+	add(r.PreviousHeadSHA)
+	add(r.HeadSHA)
+	return out
+}
+
+// HasReviewedCommit reports whether a pass of this review has already reviewed
+// the given commit -- and therefore whether its comments may already be on
+// those exact lines.
+//
+// An empty sha is never reviewed. Not knowing what the head is cannot be
+// allowed to read as "we have seen it", and it cannot read as "we have not"
+// either: the caller has to establish the head before asking.
+func (r Review) HasReviewedCommit(sha string) bool {
+	if sha == "" {
+		return false
+	}
+	for _, s := range r.ReviewedCommits() {
+		if s == sha {
+			return true
+		}
+	}
+	return false
+}
+
+// PassNumber is how many reviews firstpass has run on this pull request,
+// counting this one. It exists so an absent Pass -- every reviewed row written
+// before the field did -- reads as the first pass it was, rather than as a
+// pass 0 that has never existed.
+func (r Review) PassNumber() int {
+	if r.Pass < 1 {
+		return 1
+	}
+	return r.Pass
 }
 
 // Pending is a pull request deferred to a later sweep.
@@ -84,6 +219,29 @@ type Pending struct {
 	Attempts    int       `json:"attempts"`
 	LastAttempt time.Time `json:"last_attempt"`
 	LastReason  string    `json:"last_reason"`
+
+	// TriggerMessage is the chat message that offered this pull request, and
+	// TriggerTime is when it was posted. They are the provenance of the park,
+	// restored onto the candidate when the ref is re-offered from this bucket.
+	//
+	// Without them a deferred ref came back anonymous. That was survivable
+	// while a review was a once-per-pull-request decision, but a second pass
+	// asks "did a post ask for this, and did that post come after the last
+	// review" -- so an anonymous ref could never be one. A re-post deferred by
+	// a transient gh failure, a draft, a pause or simply the per-sweep cap was
+	// therefore lost for good, and its pending row could never be retired
+	// either, because the record gate's skip returns above expirePending: it
+	// sat in `firstpass status` for ever.
+	//
+	// A row written before these fields existed decodes with neither, which
+	// reads as "no post is known to have asked for this" -- the same as the
+	// paths that genuinely have no message behind them, and the safe answer
+	// for both.
+	//
+	// No omitempty on TriggerTime: it is inert on a struct type, so the
+	// encoder emits the zero time either way. See LastPausedAt below.
+	TriggerMessage string    `json:"trigger_message,omitempty"`
+	TriggerTime    time.Time `json:"trigger_time"`
 
 	// LastPausedAt is when this entry was last observed during a paused sweep,
 	// zero when the entry is not currently parked by a pause.

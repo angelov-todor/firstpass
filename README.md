@@ -15,7 +15,8 @@ One sweep, on a ticker or on demand:
 2. Extract GitHub pull request links from the message text (full URLs and
    `owner/repo#n` shorthand).
 3. Filter: skip PRs you authored, PRs whose owner isn't on `allow_owners`,
-   drafts, and anything already reviewed.
+   drafts, and anything already reviewed **at the commit it is now at** — see
+   [Second pass](#second-pass).
 4. For each survivor, prepare a throwaway git worktree against a local bare
    mirror of the repository.
 5. Run `claude -p "/code-review <pr-url>"` in that worktree, with a
@@ -37,6 +38,119 @@ One sweep, on a ticker or on demand:
    verdict would have been.
 8. Live, the chat message that carried the link gets a reaction, so the team
    can see the PR has been picked up and, later, how it came out.
+
+## Second pass
+
+The dedupe rule is **once per commit, on a re-post** — not once per pull
+request. A PR posted to the space again is reviewed again, but only if it has
+new commits since the pass that already reviewed it.
+
+**A second pass posts a fresh set of inline comments.** It is a whole review,
+not an increment: the reviewer is told a previous pass ran and asked to
+concentrate on what has changed and not to restate that pass's findings, but
+nothing enforces it. Expect new comments on the pull request, and a new
+verdict submitted alongside them.
+
+What the reviewer is told depends on what the earlier pass actually did:
+
+- **It posted its findings** — the usual live case. The reviewer is told which
+  commit it reviewed and asked not to restate its findings, because they are
+  already on those lines.
+- **It did not finish** (a `needs_attention` record, reached only by
+  `firstpass replay`). The reviewer is told plainly that some of that pass's
+  findings may be posted and some may not, that nothing knows how far it got,
+  and to check the pull request before posting a comment — and to raise
+  anything that is not already there.
+- **It posted nothing** — a dry run records a review but withholds
+  `--comment`, so its findings went to a report on disk. The reviewer is told
+  **nothing at all**: there is no comment to duplicate and nothing to hold
+  back, and claiming otherwise would suppress every finding for no reason.
+- **The head has not moved** (again only via `replay`). "Concentrate on what
+  has changed" would name changes that do not exist, so instead the reviewer
+  is asked for a full review, with the one caveat that still applies: check
+  before posting a comment that may already be there.
+
+All three of these must hold, or the re-post is skipped:
+
+1. The existing record's outcome is `reviewed`, and it records the commit it
+   reviewed. **No other outcome qualifies.** `needs_attention` in particular
+   still needs an explicit `firstpass replay`: it means a review died
+   mid-post, so comments may be half posted, and an automatic retry risks
+   putting a second copy of each of them on a colleague's pull request. A
+   re-post is not consent to that. Every skipped outcome fails for the plainer
+   reason that nothing was ever reviewed.
+2. The re-post is a **different chat message** from the one that triggered the
+   recorded review, **and it was posted later than that message was**. The
+   name check alone answers the wrong question. The same message can still be
+   sitting in the fifty-message fetch window on the next sweep, and both a
+   `-backfill` and a watermark gap re-offer *older* posts by design — while
+   the sweep picks the oldest message carrying a link and the record holds the
+   newest one seen. So the names differ, and an ordinary push nobody
+   re-posted would otherwise become a second review.
+
+   Comparing the two **post** times settles all of it, and it settles it for a
+   reason that holds whatever the machine's clock says: both timestamps come
+   from the Chat API, so any skew between Google's clock and this laptop's
+   cancels instead of deciding the answer. Comparing a post time against the
+   *review's* time would not — a clock an hour behind is enough to make a post
+   that genuinely predates a review look later than it. A row written before
+   the post time was recorded has nothing to compare and falls back to the
+   review time, exactly as it behaved before.
+
+   A re-post that arrives while its review is still running is refused and not
+   kept: the review's own decision time is checked too, and a post from before
+   it is dropped rather than deferred. That loses a nudge, silently; the next
+   re-post triggers normally. It is the deliberate direction — a missed pass
+   costs someone a second nudge, a spurious pass costs a colleague a duplicate
+   comment set.
+
+   A PR re-offered from the backlog carries the post that parked it, so a
+   deferred second pass can still retry; one with no post recorded is not a
+   re-post at all.
+3. The **live head SHA is not a commit any pass has already reviewed** — not
+   merely different from the last one. This is the invariant: no pull request
+   is ever reviewed twice for the same commit, because that pass's comments
+   are already on those exact lines. A head force-pushed back to an earlier
+   reviewed commit is refused for the same reason as one that never moved.
+
+Re-posted at an already-reviewed commit, the record's trigger message is
+updated to the new post and nothing else about it changes, so the same re-post
+is not re-inspected on every sweep for as long as it sits in the window.
+
+The cost is one `gh pr view` per qualifying re-post — every re-post that gets
+past conditions 1 and 2, not only the ones that turn out to have nothing new.
+A re-post of a PR that has since been merged, been put back into draft or
+changed hands pays that call too, and those skip *without* advancing the
+recorded trigger, so each later re-post or re-scan of the same post pays it
+again. All of them are reads; no new write of any kind is made.
+
+`firstpass status` marks a later pass — `reviewed / findings (pass 2)`. A row
+written before this feature existed has no pass number and reads as the first
+pass it was. A dry run's report for a later pass is written to
+`<owner>_<repo>_<n>_after_<short-sha>.md`, so it does not overwrite the report
+the previous pass left behind: reading both is how you see what the new
+commits changed.
+
+Re-posted with no new commits, a merged, closed, drafted or reassigned pull
+request keeps the record of the pass that reviewed it. Skipping is still right
+— a merged PR must not be reviewed — but the reviewed commit, the submitted
+verdict and the pass count are the only evidence of what firstpass did here,
+and none of it is recoverable from anywhere else, so a skip does not overwrite
+them. `firstpass status` therefore still shows such a PR as `reviewed`, not
+`skipped_state`. Only the backlog entry is cleared.
+
+`firstpass replay` still ignores the record when deciding whether to review —
+that is the whole point of it, and none of the three conditions applies — but
+it now **reads** the record first, so the reviewer is told that a pass has
+already been here. That matters most for the case replay is documented for: a
+`needs_attention` PR is one whose review died part-way through posting, and a
+reviewer told nothing about that will restate every finding on the lines that
+may already carry them. For such a record the reviewer is told plainly that
+the earlier pass did not finish, that nothing knows how far it got, and to
+check the pull request before posting a comment. A replay of a PR firstpass
+has never reviewed is a first pass and says nothing. Unlike a re-post, a
+replay that ends in a skip does record its own fresh decision: the operator
+asked what firstpass makes of the PR now, and that is the answer.
 
 ## Chat reactions
 
@@ -81,10 +195,16 @@ Three consequences worth knowing:
   denied repo, merged, closed, a draft, your own PR — gets **no reaction at
   all**. Nothing was reviewed, so there is nothing to report, and a bare ✅
   would be the first the team heard of it.
-- `firstpass replay` and PRs re-offered from the backlog react to nothing on
-  the way in. Neither identifies a chat message. They do still finish a
-  message off: the sweep that decides a message's last pull request adds its
-  result reaction, whichever path decided it.
+- `firstpass replay` reacts to nothing on the way in: its trigger is the
+  literal `replay` and identifies no chat message. A PR re-offered from the
+  backlog **does** now react, because a parked PR keeps a record of the post
+  that offered it — so a draft that becomes ready a day later, or a review the
+  per-sweep cap pushed to the next sweep, finally puts 👀 on the post that
+  asked for it instead of leaving that post silent about a review that
+  happened. A backlog row written before this was recorded carries no post and
+  reacts to nothing, as before. Either way the message is still finished off:
+  the sweep that decides its last pull request adds the result reaction,
+  whichever path decided it.
 
 Reactions are cosmetic, and firstpass treats them that way. A failed reaction
 — a missing OAuth scope, a deleted message, a network blip — is logged and
@@ -99,9 +219,9 @@ The chat script needs two more subcommands for this, `add-reaction
 and are logged, and reviews carry on exactly as before.
 
 Decisions and outcomes are recorded in a local `bbolt` database, so restarts
-and crashes never cause a PR to be reviewed twice. Which PRs each chat message
-carried is recorded there too, because the result reaction can be hours behind
-the post that triggered it.
+and crashes never cause a PR to be reviewed twice for the same commit. Which
+PRs each chat message carried is recorded there too, because the result
+reaction can be hours behind the post that triggered it.
 
 ## Prerequisites
 
@@ -143,7 +263,8 @@ configured Google Chat account can actually see named spaces).
 - `status` — print the review table: what's been reviewed, skipped, or
   deferred.
 - `replay <pr-url | owner/repo#n>` — force one PR through review again,
-  ignoring the dedupe record. Flags: `-live`, `-quiet`.
+  ignoring the dedupe record but telling the reviewer that an earlier pass has
+  already been here. Flags: `-live`, `-quiet`.
 - `doctor` — preflight every external dependency.
 - `pause` / `resume` — write / remove a kill-switch file. While paused,
   sweeps still queue new PRs but run no reviews and post nothing.
@@ -161,6 +282,12 @@ Read this before running anything other than `doctor` or `scan -print-only`.
   to real chat messages, under your Google identity. `dry_run` is an absolute
   "no outward effect" switch: a dry run does not react, does not submit
   a verdict, and does not even record the state a reaction would need.
+- **A re-post reviews the PR again, and posts a second set of inline
+  comments.** Only when it has new commits since the last pass — see
+  [Second pass](#second-pass) — but when it does, the author gets a fresh
+  review on their pull request and a fresh verdict submitted under your
+  identity. The reviewer is asked not to restate the previous pass's findings;
+  that is a request in a system prompt, not a guarantee.
 - **A clean PR is approved under your own GitHub identity.** Live, a
   successful review always ends in a submitted GitHub review: an approval when
   the reviewer raised nothing or only nits, a comment review when it raised

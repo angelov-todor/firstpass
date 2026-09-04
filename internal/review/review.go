@@ -153,6 +153,133 @@ const verdictInstruction = "You are running as firstpass: an automated first pas
 	"can see about what you found: if the line is missing or reworded, firstpass submits no " +
 	"verdict at all."
 
+// ShortSHA is how a commit is named to a human -- or to a reviewing agent.
+// Twelve characters, because the whole forty are noise in prose and the
+// reviewer never has to type it back.
+func ShortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
+// PreviousPass describes a pass that has already reviewed this pull request.
+// A nil *PreviousPass means this is the first pass.
+//
+// Two fields rather than a bare SHA, because "a pass has been here" and "that
+// pass finished" are different facts and the reviewer needs both. A replay --
+// whose documented use is a needs_attention pull request -- is exactly the
+// case where the second is false.
+type PreviousPass struct {
+	// HeadSHA is the commit that pass reviewed. It is also the evidence that
+	// there was a pass at all: only a record written once claude had started
+	// carries one.
+	HeadSHA string
+	// Posted says that pass's findings actually reached the pull request. A
+	// dry run records a review but withholds --comment, so its findings went
+	// to a report on disk instead: nothing is on the pull request, there is
+	// nothing to duplicate and nothing to hold back, and the reviewer is told
+	// nothing at all.
+	Posted bool
+	// Incomplete says that pass did not finish. It was posting its findings
+	// one at a time when it stopped, so some may be on the pull request and
+	// some may not, and nothing can tell which.
+	Incomplete bool
+	// HeadUnchanged says the pull request is still at a commit an earlier pass
+	// reviewed, so there is nothing new to concentrate on and no diff to take.
+	// Only a replay reaches this: a re-post requires a commit no pass has
+	// reviewed.
+	HeadUnchanged bool
+}
+
+// secondPassNote tells the reviewer that a pass has already been here. It is
+// appended to verdictInstruction and travels as --append-system-prompt for
+// exactly the reasons that instruction does: prose in the -p value becomes
+// /code-review's own $ARGUMENTS. Prompt() stays byte-identical across passes.
+//
+// Without it a second pass restates every finding the author has not yet
+// fixed, on the same lines, putting a second copy of each comment on a
+// colleague's pull request -- which is the whole cost this feature could
+// impose and the only one it cannot detect for itself.
+//
+// The incomplete variant is not a hedge for its own sake. Telling the reviewer
+// that the earlier pass posted its findings, when that pass in fact died
+// part-way through posting them, is wrong in both directions: it invites a
+// duplicate of the comments that did land, and it invites silence about the
+// findings that never did. So that variant says plainly that nothing knows how
+// far the earlier pass got, asks the reviewer to check the pull request before
+// posting a comment, and asks it to raise anything that is not already there.
+//
+// The moved-head variants ask for attention on what changed rather than for an
+// incremental diff, and say why: the mirror force-updates refs/firstpass/N, so
+// the previously-reviewed commit can be unreachable in the checkout by now. A
+// reviewer told to "diff against <sha>" would find nothing there and either
+// invent an answer or review nothing at all.
+//
+// HeadUnchanged replaces all of that framing, because none of it is true when
+// the pull request is still at a commit an earlier pass reviewed -- which only
+// a replay reaches. "Concentrate on what has changed" then names changes that
+// do not exist, and a blanket "do not restate that pass's findings" tells the
+// reviewer not to report the findings it is being asked to find, which is close
+// to neutering the command. `firstpass replay` is exactly what someone runs
+// when the first pass was unsatisfying or when they are flipping dry run to
+// live, so it has to come back with a real review. What survives is the one
+// thing still true: a comment may already be sitting on that line.
+//
+// It is deliberately not called at all when the earlier pass posted nothing;
+// see Run and PreviousPass.Posted.
+func secondPassNote(pp PreviousPass) string {
+	short := ShortSHA(pp.HeadSHA)
+
+	if pp.HeadUnchanged {
+		// Incomplete has to be honoured here too, and missing that was the
+		// whole of a real defect: this branch returns before the one below, so
+		// a replay of a needs_attention pull request whose head had not
+		// moved -- the most documented replay there is -- was told that pass's
+		// findings "were posted as inline comments on it". Some are and some
+		// are not, and nothing knows which, which is exactly what the
+		// incomplete wording exists to say.
+		what := "has already reviewed this pull request at the commit it is still at, and its " +
+			"findings were posted as inline comments on it."
+		if pp.Incomplete {
+			what = "began reviewing this pull request at the commit it is still at, and did not " +
+				"finish. Some of its findings may already be posted as inline comments on the " +
+				"pull request and some may not: it was posting them one at a time when it " +
+				"stopped, and firstpass cannot tell how far it got."
+		}
+		return "A previous automated pass " + what + " Nothing has changed since, so review it " +
+			"in full: this pass was asked for deliberately, and a review that held its findings " +
+			"back because an earlier one might have had them would say nothing at all.\n\n" +
+			"Before you post a finding, check whether that comment is already on the pull " +
+			"request, and do not post it again if it is: a second copy of the same comment on " +
+			"the same line spends the author's time twice on one point. Everything else, raise " +
+			"as you normally would."
+	}
+
+	head := "A previous automated pass already reviewed this pull request at commit " + short +
+		" and posted its findings as inline comments on it.\n\n" +
+		"Concentrate on what has changed since " + short + ". Do not restate findings from that " +
+		"pass: they are already on the pull request, and repeating one puts a second copy of the " +
+		"same comment on the same line, which spends the author's time twice on one point."
+	if pp.Incomplete {
+		head = "A previous automated pass began reviewing this pull request at commit " + short +
+			" and did not finish. Some of its findings may already be posted as inline comments " +
+			"on the pull request and some may not: it was posting them one at a time when it " +
+			"stopped, and firstpass cannot tell how far it got.\n\n" +
+			"Concentrate on what has changed since " + short + ". Before you post a finding, " +
+			"check whether that comment is already on the pull request, and do not post it again " +
+			"if it is: a second copy of the same comment on the same line spends the author's " +
+			"time twice on one point. Where a finding is not already there, raise it -- the " +
+			"earlier pass may never have got to it."
+	}
+
+	return head + "\n\n" +
+		"Review the pull request as it now stands, not a diff against " + short + ": firstpass " +
+		"force-updates the mirror ref it checks out, so " + short + " may no longer be reachable " +
+		"from the checkout you are looking at. Work out what has changed from the pull request " +
+		"itself."
+}
+
 // ReportError reports that the review itself finished but its dry-run report
 // could not be written.
 //
@@ -174,12 +301,26 @@ func (e *ReportError) Unwrap() error { return e.Err }
 // happened, and reading a dry-run report is the gate before ever going live,
 // so discarding the captured output on the failure path left nothing to read
 // at the worst possible moment. The report names the failure itself.
-func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef) (Result, error) {
+//
+// previous describes a pass that has already reviewed this pull request, and
+// nil means this is the first pass. It changes only the system prompt and the
+// dry-run report's filename: the -p value is byte-identical across passes,
+// because everything in it is /code-review's own arguments.
+func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous *PreviousPass) (Result, error) {
+	system := verdictInstruction
+	// Posted is a gate, not merely a wording input. An earlier pass that
+	// posted nothing left nothing on the pull request to duplicate and nothing
+	// to hold back, so there is nothing worth telling the reviewer -- and both
+	// of the note's claims would be false. previous is still carried in either
+	// way, because the report filename depends on it.
+	if previous != nil && previous.Posted {
+		system += "\n\n" + secondPassNote(*previous)
+	}
 	// extraArgs stays last: it is operator-controlled config, so it must keep
 	// being able to override anything firstpass sets for itself.
 	args := append([]string{
 		"-p", rr.Prompt(ref),
-		"--append-system-prompt", verdictInstruction,
+		"--append-system-prompt", system,
 	}, rr.extraArgs...)
 
 	res, err := rr.r.Run(ctx, dir, rr.claude, args...)
@@ -205,7 +346,7 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef) (Result,
 		return out, runErr
 	}
 
-	path, werr := rr.writeReport(ref, res.Stdout, out.Verdict, runErr)
+	path, werr := rr.writeReport(ref, previous, res.Stdout, out.Verdict, runErr)
 	if werr != nil {
 		if runErr != nil {
 			// The review failed and so did the report. The review failure is
@@ -241,12 +382,23 @@ func verdictNote(v Verdict) string {
 // writeReport writes the dry-run report. failure, when non-nil, is the
 // review's own failure and is recorded in the header, so a report that holds
 // only partial output cannot be mistaken for a complete review.
-func (rr *Runner) writeReport(ref prref.PRRef, body []byte, verdict Verdict, failure error) (string, error) {
+// A later pass over the same pull request gets its own filename, suffixed
+// with the commit the pass before it reviewed. Both reports then survive,
+// which is what the operator needs to see what the new commits changed --
+// and the first pass's name is left exactly as it was, so nothing already on
+// disk moves.
+func (rr *Runner) writeReport(ref prref.PRRef, previous *PreviousPass, body []byte,
+	verdict Verdict, failure error) (string, error) {
+
 	if err := os.MkdirAll(rr.reportsDir, 0o700); err != nil {
 		return "", err
 	}
-	path := filepath.Join(rr.reportsDir,
-		fmt.Sprintf("%s_%s_%d.md", ref.Owner, ref.Repo, ref.Number))
+	name := fmt.Sprintf("%s_%s_%d.md", ref.Owner, ref.Repo, ref.Number)
+	if previous != nil {
+		name = fmt.Sprintf("%s_%s_%d_after_%s.md",
+			ref.Owner, ref.Repo, ref.Number, ShortSHA(previous.HeadSHA))
+	}
+	path := filepath.Join(rr.reportsDir, name)
 
 	header := fmt.Sprintf("# Review of %s\n\n%s\n\nGenerated %s — dry run, nothing posted.\n",
 		ref.Key(), ref.URL(), time.Now().UTC().Format(time.RFC3339))

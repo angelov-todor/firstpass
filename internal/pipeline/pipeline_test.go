@@ -54,6 +54,12 @@ type fakePRs struct {
 	// runner.Fake instead; see verdict_test.go.
 	submitted []submittedVerdict
 	submitErr error
+
+	// inspected records every ref this fake was asked about, in order. Some
+	// gates exist precisely to decide without a GitHub call, so "Inspect was
+	// never called" is the assertion for those -- the outcome alone would be
+	// satisfied by the gate having moved below GitHub.
+	inspected []string
 }
 
 type submittedVerdict struct {
@@ -63,6 +69,7 @@ type submittedVerdict struct {
 }
 
 func (f *fakePRs) Inspect(_ context.Context, ref prref.PRRef) (ghpr.PRInfo, error) {
+	f.inspected = append(f.inspected, ref.Key())
 	if e, ok := f.err[ref.Key()]; ok {
 		return ghpr.PRInfo{}, e
 	}
@@ -107,10 +114,16 @@ type fakeRev struct {
 	// onRun runs after the review is recorded as having happened, where a
 	// Ctrl-C arriving as claude finishes would land.
 	onRun func()
+	// prevPasses records the *review.PreviousPass handed to each invocation,
+	// in order, so a test can prove a later pass told the reviewer which
+	// commit the pass before it looked at and whether that pass finished --
+	// and that a first pass told it nothing at all.
+	prevPasses []*review.PreviousPass
 }
 
-func (f *fakeRev) Run(ctx context.Context, _ string, ref prref.PRRef) (review.Result, error) {
+func (f *fakeRev) Run(ctx context.Context, _ string, ref prref.PRRef, previous *review.PreviousPass) (review.Result, error) {
 	f.ran = append(f.ran, ref.Key())
+	f.prevPasses = append(f.prevPasses, previous)
 	// A cancelled context is an error, never a clean run: runner.OS returns
 	// ctx.Err() ahead of any exit status precisely so a review killed by a
 	// Ctrl-C or a deadline cannot be mistaken for one that finished.

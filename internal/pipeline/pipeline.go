@@ -44,7 +44,13 @@ type (
 		Prepare(ctx context.Context, ref prref.PRRef) (dir string, cleanup func(), err error)
 	}
 	Reviewer interface {
-		Run(ctx context.Context, dir string, ref prref.PRRef) (review.Result, error)
+		// previous describes a pass that has already reviewed this pull
+		// request, and nil means this is the first pass. The reviewer needs
+		// it to be told a pass has already been here: otherwise a second
+		// pass restates every finding the author has not fixed, on the same
+		// lines. It reaches claude as part of the system prompt, never in
+		// the -p value.
+		Run(ctx context.Context, dir string, ref prref.PRRef, previous *review.PreviousPass) (review.Result, error)
 	}
 	// Reactor puts reactions on chat messages, so the team can see that a
 	// posted pull request has been picked up. Everything it does is
@@ -120,6 +126,136 @@ func noVerdictDetail(dryRun bool) string {
 func inFlightDetail(ref prref.PRRef) string {
 	return "a previous run died mid-review, so comments may already be posted; " +
 		"run `firstpass replay " + ref.URL() + "` to review it again deliberately"
+}
+
+// secondPassDue reports whether an existing record plus this candidate's
+// trigger satisfy the two conditions for a second pass that can be decided
+// without asking GitHub anything. The third -- that the pull request actually
+// has new commits -- needs the live head SHA and is checked just below
+// Inspect.
+//
+// Condition 1: the record's outcome is `reviewed`, and nothing else -- and it
+// records the commit it reviewed.
+//
+// needs_attention in particular does not qualify. It means a review died
+// mid-post, so comments may be half posted on a colleague's pull request, and
+// an automatic retry risks a second copy of each of them. A re-post is not
+// consent to that; `firstpass replay` is. Every skipped outcome fails this
+// too, for the plainer reason that nothing was ever reviewed: there is no
+// first pass for a second one to follow.
+//
+// A reviewed record with no head SHA on it fails as well, and that is the
+// safe direction rather than an oversight. Condition 3 is the guarantee that
+// no pull request is reviewed twice for the same commit; a record that does
+// not say which commit it reviewed cannot support that guarantee, so treating
+// "unknown" as "different" would be double-posting on a colleague's pull
+// request on the strength of a missing field. A pull request reviewed off the
+// pending backlog carries no trigger message either, so the pairing is the
+// usual one: no first-pass evidence, no automatic second pass. `firstpass
+// replay` still works, and says the operator meant it.
+//
+// Condition 2: the trigger is a different, non-empty chat message, posted
+// after the review finished.
+//
+// The name inequality is the cheap first filter and it kills the
+// same-message-in-window case outright. It is not sufficient on its own,
+// because it answers the wrong question: what has to be established is "this
+// post came after we reviewed it", and two names differing does not say that.
+//
+// A watermark gap and a `scan -backfill N` both re-offer posts that are older
+// than the review -- chat.Client returns the whole window when the watermark
+// has fallen out of it and Sweep deliberately processes all of it, and a
+// backfill ignores the watermark by design -- while candidates() takes the
+// *oldest* message carrying a ref and the record holds the newest one seen. So
+// the names differ, and if the head has moved for any reason at all, an
+// ordinary push nobody re-posted becomes a full second comment set and a
+// submitted verdict on a colleague's pull request. Invisibly, too: the older
+// message's reaction latches are already set, so no 👀 and no result reaction
+// appear to give it away. "A laptop closed over a weekend" is enough to
+// produce the gap, and this is a daemon on a laptop.
+//
+// The time comparison subsumes all three cases at once. A gap re-scan and a
+// backfill offer posts older than the review, so both are suppressed; a
+// genuine re-post is newer, so it passes.
+//
+// DecidedAt rather than StartedAt, and strictly after rather than at: a post
+// landing while the review was still running, or at the very moment it
+// finished, cannot have been prompted by its result. Declining it is the
+// fail-safe direction and costs nothing, because the next re-post is newer and
+// does trigger. A record with no DecidedAt at all is refused for the same
+// reason its missing head SHA is: nothing can establish the ordering, and
+// unknown must not read as satisfied.
+//
+// The same message can still be sitting in the fifty-message fetch window on
+// the next sweep -- a backfill, or a watermark gap, will offer it again -- and
+// re-reviewing on that would review a pull request once per sweep forever. A
+// ref re-offered out of the pending bucket carries no trigger at all, because
+// pending is keyed by pull request rather than by post, so an empty trigger is
+// never a re-post either.
+func secondPassDue(prev store.Review, trigger string, postedAt time.Time) bool {
+	if prev.Outcome != store.OutcomeReviewed || prev.HeadSHA == "" {
+		return false
+	}
+	if trigger == "" || trigger == prev.TriggerMessage {
+		return false
+	}
+	// "Did this post arrive after the review finished." One clock timestamps
+	// the post and another the decision, so this cannot carry the ordering on
+	// its own -- see below -- but for this question the skew does not matter:
+	// it decides only whether a post that landed around the review counts, and
+	// either answer costs at most a deferred nudge.
+	if prev.DecidedAt.IsZero() || !postedAt.After(prev.DecidedAt) {
+		return false
+	}
+	// "Did this post come after the one we reviewed for." Both values are
+	// posting times reported by the Chat API, so any skew between Google's
+	// clock and this machine's cancels instead of deciding the answer.
+	//
+	// A row written before TriggerTime existed has nothing to compare, so it
+	// falls back to the DecidedAt check above and behaves exactly as it does
+	// today. Conservative: it is the pre-existing behaviour, not a new
+	// permission.
+	if prev.TriggerTime.IsZero() {
+		return true
+	}
+	return postedAt.After(prev.TriggerTime)
+}
+
+// noteRetrigger records that a re-post was seen and had nothing new in it, by
+// moving the record's trigger to the message that asked. That is the only
+// field it touches: the pull request was not reviewed again, so the recorded
+// SHA, verdict, timings and detail all still describe exactly what happened,
+// and rewriting any of them would claim otherwise.
+//
+// Without it the same re-post would be re-inspected -- one `gh pr view` -- on
+// every sweep for as long as it stayed in the fetch window.
+//
+// Print-only writes nothing, like every other write in handle.
+func (p *Pipeline) noteRetrigger(prev store.Review, c candidate, opts Options) error {
+	if opts.PrintOnly {
+		return nil
+	}
+	// Both halves of the trigger, always together: they are one fact about one
+	// post, and a name from the new post beside a time from the old one is a
+	// pair that describes no post at all -- and the time is half of the test
+	// that decides the next re-post.
+	prev.TriggerMessage = c.trigger
+	prev.TriggerTime = c.triggerAt
+	if err := p.Store.PutReview(prev); err != nil {
+		p.Log.Error("put review", "key", prev.Key, "err", err)
+		return err
+	}
+	// The pending row goes too. A second pass deferred by a transient failure
+	// parks one, and if its re-post then turns out to have nothing new this
+	// branch is where it lands -- above expirePending, and on every later
+	// sweep the record gate skips it before the expiry can ever run. Left
+	// behind, the row sits in `firstpass status` for good. This is the same
+	// leak the parked provenance fixed, reached by a different branch.
+	if err := p.Store.DeletePending(prev.Key); err != nil {
+		p.Log.Error("delete pending", "key", prev.Key, "err", err)
+		return err
+	}
+	return nil
 }
 
 // Decision is one line of the sweep's report.
@@ -237,6 +373,19 @@ type Pipeline struct {
 type candidate struct {
 	ref     prref.PRRef
 	trigger string
+	// triggerAt is when that message was posted, which is what tells a
+	// genuine re-post from a sweep re-reading its own past -- a watermark gap
+	// or a backfill offers messages older than the review they triggered. Zero
+	// for a candidate with no chat message behind it.
+	triggerAt time.Time
+	// previous is the record of a pass that has already reviewed this pull
+	// request, carried in rather than read by handle. Only ReviewOne sets it:
+	// a replay bypasses the record gate, which is where every other candidate
+	// learns about its own history, so without this a replay would review
+	// blind -- and the documented use of `firstpass replay` is a
+	// needs_attention pull request, the one case where comments may already be
+	// half posted.
+	previous *store.Review
 }
 
 func (p *Pipeline) now() time.Time {
@@ -482,7 +631,7 @@ func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
 				continue
 			}
 			seen[ref.Key()] = true
-			out = append(out, candidate{ref: ref, trigger: msgs[i].Name})
+			out = append(out, candidate{ref: ref, trigger: msgs[i].Name, triggerAt: msgs[i].CreateTime})
 		}
 	}
 
@@ -501,7 +650,13 @@ func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
 			continue
 		}
 		seen[pd.Key] = true
-		out = append(out, candidate{ref: ref})
+		// The provenance of the park comes back with it, so a deferred second
+		// pass can still tell that a post asked for it and when. A row that
+		// records none yields none, which is the same anonymous candidate this
+		// used to produce for every ref.
+		out = append(out, candidate{
+			ref: ref, trigger: pd.TriggerMessage, triggerAt: pd.TriggerTime,
+		})
 	}
 	return out
 }
@@ -548,13 +703,19 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// a second set of comments on a colleague's PR. Skipped instead, the
 	// record simply stays where it is until handle overwrites it with a fresh
 	// decision of its own.
+	// previous is the pass that already reviewed this pull request: carried
+	// down from the record gate when a second pass may be due, or handed in on
+	// the candidate by a replay, which bypasses that gate. Nil for every other
+	// candidate.
+	previous := c.previous
+
 	if !opts.replay {
 		if prev, ok, err := p.Store.Review(ref.Key()); err != nil {
 			p.Log.Error("read review", "key", ref.Key(), "err", err)
 			// A read failure must still park the ref -- otherwise it falls out of
 			// every bucket while the watermark advances past the message that
 			// produced it, and it is never seen again.
-			note(p.hold(ref, "store read failed", opts))
+			note(p.hold(c, "store read failed", opts))
 			return dec(ActionDefer, "store read failed")
 		} else if ok {
 			if !prev.Outcome.Terminal() {
@@ -586,7 +747,17 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 				// decided" here would read as a PR that was dealt with cleanly.
 				return dec(ActionNeedsAttention, inFlightReason)
 			}
-			return dec(ActionSkip, "already decided: "+string(prev.Outcome))
+			if !secondPassDue(prev, c.trigger, c.triggerAt) {
+				return dec(ActionSkip, "already decided: "+string(prev.Outcome))
+			}
+			// Conditions 1 and 2 hold: a reviewed record, re-posted by a
+			// different message. Condition 3 -- new commits -- needs the live
+			// head SHA, which only GitHub knows, so this candidate falls
+			// through with its previous record in hand and is decided just
+			// below Inspect. Nothing else about the gate order changes: every
+			// other outcome still skips right here, above every gate that
+			// follows.
+			previous = &prev
 		}
 	}
 
@@ -606,14 +777,14 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	//     survives: a ref that had waited six days before the pause has still
 	//     waited six days after it.
 	if rep.Paused || rep.pausedMidSweep {
-		note(p.holdPaused(ref, "paused", opts))
+		note(p.holdPaused(c, "paused", opts))
 		return dec(ActionDefer, "paused")
 	}
 
 	// A replay is exempt: the operator named this PR, so a stale backlog entry
 	// must not retire it out from under them.
 	if !opts.replay {
-		expired, err := p.expirePending(ref, opts)
+		expired, err := p.expirePending(ref, previous, opts)
 		if err != nil {
 			// Deferred, exactly as the Store.Review read failure above is. A
 			// failing read is not an absent entry: it leaves this ref's age
@@ -623,7 +794,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 			// enough -- that only guarantees the ref is offered again, not
 			// that this sweep declines to review it now.
 			note(err)
-			note(p.hold(ref, "pending read failed", opts))
+			note(p.hold(c, "pending read failed", opts))
 			return dec(ActionDefer, "pending read failed")
 		}
 		if expired {
@@ -635,7 +806,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// failure, and letting it burn attempts would expire a backlog over
 	// nothing but bad luck in scheduling.
 	if rep.reviewAttempts >= p.Cfg.MaxReviewsPerSweep {
-		note(p.hold(ref, "per-sweep cap reached", opts))
+		note(p.hold(c, "per-sweep cap reached", opts))
 		return dec(ActionDefer, "per-sweep cap reached")
 	}
 
@@ -644,26 +815,68 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	info, err := p.PRs.Inspect(ictx, ref)
 	cancelInspect()
 	if err != nil {
-		note(p.deferAttempt(ref, "inspect failed: "+err.Error(), opts))
+		note(p.deferAttempt(c, "inspect failed: "+err.Error(), opts))
 		return dec(ActionDefer, "inspect failed: "+err.Error())
 	}
+
+	// Condition 3, and the only place it can be asked: the live head SHA.
+	//
+	// This is the whole new cost of the second pass -- one `gh pr view` per
+	// re-post that turns out to have no new commits. Accepted deliberately:
+	// the alternative is trusting the re-post itself, which would review a
+	// commit whose comments are already sitting on those exact lines.
+	//
+	// It sits above the state gate on purpose. A pull request re-posted after
+	// it was merged is the common case, and skipping here leaves its reviewed
+	// record -- and the verdict on it -- intact, where falling through to the
+	// state gate would overwrite it with skipped_state.
+	//
+	// !opts.replay is load-bearing, not defensive. A replay also carries a
+	// previous record now -- so the reviewer can be told a pass has been here
+	// -- and without this guard a replay of the very commit that was already
+	// reviewed would be skipped as "no new commits", which is the one thing
+	// `firstpass replay` must never do: getting past the dedupe is the whole
+	// point of the command, and the operator named this pull request.
+	//
+	// The question is asked of every commit any pass has reviewed, not just
+	// the last one. HeadSHA alone is the most recent pass's commit, so a head
+	// force-pushed back to an earlier reviewed commit compares unequal to it
+	// and would be reviewed again -- posting a second copy of that pass's
+	// comments onto the exact lines that already carry them, which is the
+	// headline invariant failing in the one way it exists to prevent.
+	if !opts.replay && previous != nil && previous.HasReviewedCommit(info.HeadSHA) {
+		// The trigger is updated so the same re-post is not re-inspected on
+		// every sweep for as long as it sits in the fetch window. Nothing else
+		// on the record moves: nothing else happened.
+		note(p.noteRetrigger(*previous, c, opts))
+		if info.HeadSHA == previous.HeadSHA {
+			return dec(ActionSkip, "re-posted with no new commits since "+
+				review.ShortSHA(previous.HeadSHA))
+		}
+		return dec(ActionSkip, "re-posted at "+review.ShortSHA(info.HeadSHA)+
+			", which an earlier pass already reviewed: no new commits to review")
+	}
 	if info.State != "OPEN" {
-		note(p.terminal(ref, store.OutcomeSkippedState, c.trigger, "state "+info.State, opts))
+		note(p.terminalSkip(ref, previous, store.OutcomeSkippedState, c.trigger, "state "+info.State, opts))
 		return dec(ActionSkip, "state "+info.State)
 	}
 	if info.IsDraft {
 		// Deferred, not terminal: a draft is routinely marked ready later, and
 		// by then the message has scrolled past the watermark.
-		note(p.deferAttempt(ref, "draft", opts))
+		note(p.deferAttempt(c, "draft", opts))
 		return dec(ActionDefer, "draft")
 	}
 	if strings.EqualFold(info.Author, p.Cfg.GithubLogin) {
-		note(p.terminal(ref, store.OutcomeSkippedAuthor, c.trigger, "authored by "+info.Author, opts))
+		note(p.terminalSkip(ref, previous, store.OutcomeSkippedAuthor, c.trigger, "authored by "+info.Author, opts))
 		return dec(ActionSkip, "own PR")
 	}
 
 	if opts.PrintOnly {
-		return dec(ActionWouldReview, "OPEN, not draft, author "+info.Author)
+		reason := "OPEN, not draft, author " + info.Author
+		if previous != nil {
+			reason += "; second pass, new commits since " + review.ShortSHA(previous.HeadSHA)
+		}
+		return dec(ActionWouldReview, reason)
 	}
 
 	// A bare clone of a whole repository is the longest subprocess firstpass
@@ -673,7 +886,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	dir, cleanup, err := p.WTs.Prepare(wctx, ref)
 	cancelPrepare()
 	if err != nil {
-		note(p.deferAttempt(ref, "worktree failed: "+err.Error(), opts))
+		note(p.deferAttempt(c, "worktree failed: "+err.Error(), opts))
 		return dec(ActionDefer, "worktree failed: "+err.Error())
 	}
 	defer cleanup()
@@ -685,7 +898,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// No attempt is counted: a pause is not a failure of this PR.
 	if p.paused() {
 		rep.pausedMidSweep = true
-		note(p.holdPaused(ref, "paused after the worktree was prepared", opts))
+		note(p.holdPaused(c, "paused after the worktree was prepared", opts))
 		return dec(ActionDefer, "paused before the review started")
 	}
 
@@ -695,7 +908,45 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		Outcome:        store.OutcomeInFlight,
 		HeadSHA:        info.HeadSHA,
 		TriggerMessage: c.trigger,
+		TriggerTime:    c.triggerAt,
 		StartedAt:      started,
+		Pass:           1,
+		ReviewedSHAs:   []string{info.HeadSHA},
+		// Recorded as the pass starts, so the pass after it can be told the
+		// truth about whether anything of this one reached the pull request.
+		// A dry run withholds --comment: its findings go to a report on disk.
+		DryRun: p.Cfg.DryRun,
+	}
+	// prevPass is what the reviewer is told. Its Incomplete flag is the
+	// difference between "that pass posted its findings" and "that pass died
+	// part-way through posting them, and nothing knows how far it got" -- only
+	// a replay can reach the second, because a re-post requires a `reviewed`
+	// record to get this far.
+	var prevPass *review.PreviousPass
+	if previous != nil {
+		// The commit the previous pass reviewed is kept rather than
+		// overwritten: it is the only record of which commit already has
+		// this tool's comments on it, and it is what the reviewer is told
+		// about so it does not restate that pass's findings.
+		rec.Pass = previous.PassNumber() + 1
+		rec.PreviousHeadSHA = previous.HeadSHA
+		// Appended to a copy, never to the decoded slice in place: the record
+		// this came from is read again below on the failure paths.
+		rec.ReviewedSHAs = append(append([]string{}, previous.ReviewedCommits()...), info.HeadSHA)
+		prevPass = &review.PreviousPass{
+			HeadSHA: previous.HeadSHA,
+			// A dry-run pass posted nothing, so there is nothing on the pull
+			// request to duplicate or to hold back and the reviewer is told
+			// nothing at all -- see review.Run. Kept out of the note rather
+			// than reworded into it: "a pass looked at this and you cannot
+			// see what it found" is not actionable.
+			Posted:     !previous.DryRun,
+			Incomplete: previous.Outcome != store.OutcomeReviewed,
+			// Only a replay reaches this: a re-post requires a commit no pass
+			// has reviewed. Asked of the whole set, so a replay after a
+			// force-push back to an earlier reviewed commit is recognised too.
+			HeadUnchanged: previous.HasReviewedCommit(info.HeadSHA),
+		}
 	}
 	// Written before claude starts: this record is the only evidence that a
 	// review was underway if the process dies while posting comments.
@@ -705,7 +956,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		// The worktree was already prepared -- a clone happened -- so this
 		// must still park the ref, or it is discarded with nothing to show
 		// for the clone and never reconsidered.
-		note(p.hold(ref, "could not record in_flight", opts))
+		note(p.hold(c, "could not record in_flight", opts))
 		return dec(ActionDefer, "could not record in_flight")
 	}
 
@@ -723,7 +974,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// candidate in the batch.
 	rep.reviewAttempts++
 	p.progress(Event{Stage: StageReviewStarted, Ref: ref, Index: idx, Total: total})
-	res, rerr := p.Rev.Run(rctx, dir, ref)
+	res, rerr := p.Rev.Run(rctx, dir, ref, prevPass)
 	done := p.now()
 
 	rec.DecidedAt = done
@@ -813,7 +1064,11 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		Stage: StageReviewFinished, Ref: ref, Index: idx, Total: total,
 		Detail: reviewFinishedDetail(string(rec.Outcome), done.Sub(started)),
 	})
-	return dec(ActionReview, "reviewed")
+	reason := "reviewed"
+	if rec.Pass > 1 {
+		reason = "reviewed (pass " + strconv.Itoa(rec.Pass) + ")"
+	}
+	return dec(ActionReview, reason)
 }
 
 // submitVerdict submits the verdict of a review that has just succeeded, and
@@ -914,10 +1169,40 @@ func (p *Pipeline) ReviewOne(ctx context.Context, ref prref.PRRef, opts Options)
 	// that defers leaves both records exactly as they were.
 	opts.replay = true
 
+	// Read, not obeyed. opts.replay above makes handle ignore this record when
+	// deciding whether to review -- that is the whole point of the command --
+	// but the reviewer still has to be told that a pass has already been here,
+	// which is a different question and one only this read can answer.
+	//
+	// It matters most for the case replay is documented for. A
+	// needs_attention record means a review died part-way through posting, so
+	// some of its comments may already be on a colleague's pull request; a
+	// reviewer told nothing about that will restate every finding on the same
+	// lines it used before. That is the duplicate comment set needs_attention
+	// exists to warn about, arrived at by the command the warning tells the
+	// operator to run.
+	//
+	// The recorded head SHA is the evidence, not the outcome: only a record
+	// written once claude had started carries one, so a skipped or expired row
+	// -- nothing reviewed, nothing posted -- correctly yields no note at all.
+	// Anything short of `reviewed` is passed on as incomplete, because "that
+	// pass posted its findings" is a claim only a finished pass supports.
+	//
+	// A failed read costs the note and nothing else. The operator asked for
+	// this review by name, so refusing it over a read that will probably work
+	// next time would be the worse trade -- but it is logged, because it means
+	// the reviewer went in with less than it could have had.
+	var previous *store.Review
+	if prev, ok, err := p.Store.Review(ref.Key()); err != nil {
+		p.Log.Error("read review before replay", "key", ref.Key(), "err", err)
+	} else if ok && prev.HeadSHA != "" {
+		previous = &prev
+	}
+
 	// The per-sweep cap needs no adjustment: a replay starts with zero
 	// attempts and Validate forbids a cap of zero, so the gate cannot trip.
 	rep := SweepReport{}
-	return p.handle(ctx, candidate{ref: ref, trigger: "replay"}, &rep, opts, 1, 1), nil
+	return p.handle(ctx, candidate{ref: ref, trigger: "replay", previous: previous}, &rep, opts, 1, 1), nil
 }
 
 // terminal closes the book on a ref and clears any pending entry for it. In
@@ -950,8 +1235,63 @@ func (p *Pipeline) terminal(ref prref.PRRef, o store.Outcome, trigger, detail st
 // keeps accruing age: a ref parked by the per-sweep cap, or by a store
 // failure, must still expire eventually, or age-based expiry never fires for a
 // backlog that is permanently over the cap.
-func (p *Pipeline) hold(ref prref.PRRef, reason string, opts Options) error {
-	return p.upsertPending(ref, reason, false, false, opts)
+// terminalSkip records a terminal skip -- unless this candidate carries the
+// record of a pass that has already reviewed this pull request, in which case
+// that record is left exactly as it is and only the pending entry is cleared.
+//
+// Skipping is still right at every gate that calls this: a merged pull
+// request, or one now attributed to you, must not be reviewed. What is not
+// right is overwriting the record while doing it. That record is the only
+// evidence of what firstpass did here -- the commit it reviewed, the verdict
+// it submitted under the operator's own GitHub identity, and which pass that
+// was -- and none of it is recoverable from anywhere else. A skip would
+// replace all of it with a description of GitHub's current state.
+//
+// Not rewriting, rather than rewriting while preserving those fields, because
+// the question the record answers is "what did firstpass do about this pull
+// request", and it already answers it correctly. Somebody merging the pull
+// request afterwards, or `github_login` changing under it, is not a firstpass
+// decision at all, and a record that said `skipped_state` with a reviewed
+// SHA and a submitted verdict hanging off it would be a state no other code
+// path can produce and no reader would know how to interpret.
+//
+// This applies only below the record gate. The owner allowlist and the deny
+// list sit *above* it and still record their refusal unconditionally: those
+// are firstpass's own decisions, they are the safety rails rather than a
+// report of somebody else's action, and a candidate re-posted from a
+// disallowed owner never reaches the record read at all.
+//
+// A replay is unconditional too, and that asymmetry is deliberate. A replay
+// carries a previous record for the reviewer's sake, but the operator named
+// this pull request and asked what firstpass makes of it now, so the fresh
+// decision is the answer to a question that was actually asked -- and a stale
+// "reviewed" detail left standing over an explicit `firstpass replay` is what
+// TestReviewOneTerminalSkipReplacesThePriorRecord exists to prevent. A re-post
+// asks for a review, not for a fresh verdict on whether firstpass should be
+// reviewing, so declining it is not news worth overwriting history with.
+//
+// The pending entry is still deleted. That is housekeeping rather than
+// history: left behind, it is re-offered on every sweep until it expires.
+func (p *Pipeline) terminalSkip(ref prref.PRRef, previous *store.Review, o store.Outcome,
+	trigger, detail string, opts Options) error {
+
+	if previous == nil || opts.replay {
+		return p.terminal(ref, o, trigger, detail, opts)
+	}
+	if opts.PrintOnly {
+		return nil
+	}
+	p.Log.Info("skipped, keeping the earlier pass's record", "key", ref.Key(),
+		"would_have_been", string(o), "detail", detail, "kept", string(previous.Outcome))
+	if err := p.Store.DeletePending(ref.Key()); err != nil {
+		p.Log.Error("delete pending", "key", ref.Key(), "err", err)
+		return err
+	}
+	return nil
+}
+
+func (p *Pipeline) hold(c candidate, reason string, opts Options) error {
+	return p.upsertPending(c, reason, false, false, opts)
 }
 
 // holdPaused parks a ref during a pause, and is the only caller that stops the
@@ -979,13 +1319,13 @@ func (p *Pipeline) hold(ref prref.PRRef, reason string, opts Options) error {
 // Nothing else may stop the clock: every other park clears LastPausedAt, since
 // leaving it set would credit the pause with the unpaused time since the
 // resume.
-func (p *Pipeline) holdPaused(ref prref.PRRef, reason string, opts Options) error {
-	return p.upsertPending(ref, reason, false, true, opts)
+func (p *Pipeline) holdPaused(c candidate, reason string, opts Options) error {
+	return p.upsertPending(c, reason, false, true, opts)
 }
 
 // deferAttempt parks a ref and counts an attempt against its expiry budget.
-func (p *Pipeline) deferAttempt(ref prref.PRRef, reason string, opts Options) error {
-	return p.upsertPending(ref, reason, true, false, opts)
+func (p *Pipeline) deferAttempt(c candidate, reason string, opts Options) error {
+	return p.upsertPending(c, reason, true, false, opts)
 }
 
 // upsertPending writes nothing in print-only mode, so a dry run cannot burn
@@ -996,7 +1336,8 @@ func (p *Pipeline) deferAttempt(ref prref.PRRef, reason string, opts Options) er
 // the expiry clock, and only ever by shifting FirstSeen forward by paused time
 // as that time accrues; see holdPaused for why, and why every other park
 // clears LastPausedAt instead.
-func (p *Pipeline) upsertPending(ref prref.PRRef, reason string, countAttempt, paused bool, opts Options) error {
+func (p *Pipeline) upsertPending(c candidate, reason string, countAttempt, paused bool, opts Options) error {
+	ref := c.ref
 	if opts.PrintOnly || opts.replay {
 		return nil
 	}
@@ -1022,6 +1363,15 @@ func (p *Pipeline) upsertPending(ref prref.PRRef, reason string, countAttempt, p
 		pd.FirstSeen = pd.FirstSeen.Add(now.Sub(pd.LastPausedAt))
 		pd.LastPausedAt = now
 	}
+	// Set, never cleared. A ref re-offered from this bucket carries the
+	// trigger back out again, so the round trip preserves it -- but a park
+	// from a path that names no chat message must leave what an earlier park
+	// recorded alone, or one anonymous defer would strand the re-post for
+	// good.
+	if c.trigger != "" {
+		pd.TriggerMessage = c.trigger
+		pd.TriggerTime = c.triggerAt
+	}
 	if countAttempt {
 		pd.Attempts++
 		pd.LastAttempt = now
@@ -1039,7 +1389,7 @@ func (p *Pipeline) upsertPending(ref prref.PRRef, reason string, countAttempt, p
 // reads and evaluates the pending entry in print-only mode -- the caller
 // needs the true decision -- but terminal() (called with the same opts) is
 // what suppresses the write.
-func (p *Pipeline) expirePending(ref prref.PRRef, opts Options) (bool, error) {
+func (p *Pipeline) expirePending(ref prref.PRRef, previous *store.Review, opts Options) (bool, error) {
 	pd, ok, err := p.Store.Pending(ref.Key())
 	if err != nil {
 		// A failing read is not an absent entry. Collapsed into one condition,
@@ -1065,5 +1415,5 @@ func (p *Pipeline) expirePending(ref prref.PRRef, opts Options) (bool, error) {
 		reason = "expired after " + age.Round(time.Hour).String() + " pending"
 	}
 	p.Log.Warn("pending expired", "key", pd.Key, "reason", reason, "last", pd.LastReason)
-	return true, p.terminal(ref, store.OutcomeExpired, "", reason, opts)
+	return true, p.terminalSkip(ref, previous, store.OutcomeExpired, "", reason, opts)
 }
