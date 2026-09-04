@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"slices"
 
 	"github.com/angelov-todor/firstpass/internal/chat"
 	"github.com/angelov-todor/firstpass/internal/prref"
@@ -82,13 +83,22 @@ func (p *Pipeline) recordMessages(msgs []chat.Message, opts Options) {
 			p.Log.Error("read message record", "message", m.Name, "err", err)
 			continue
 		}
+		if ok && slices.Equal(rec.RefKeys, keys) {
+			// Nothing to say. Every sweep re-reads the whole fetch window, so
+			// without this the common case is fetch_limit bbolt write
+			// transactions -- one fsync each -- rewriting rows byte for byte
+			// every interval, for the lifetime of the daemon.
+			continue
+		}
 		if !ok {
 			rec = store.MessageRecord{Name: m.Name, FirstSeen: p.now()}
 		}
 		// Replaced rather than merged. The refs a message carries come from
 		// its text, so re-reading the same message yields the same list; if an
 		// edit ever removed a link, the message must not go on waiting forever
-		// for a pull request it no longer mentions.
+		// for a pull request it no longer mentions. The reaction fields are
+		// untouched either way, which is what stops a re-offered message being
+		// reacted to a second time.
 		rec.RefKeys = keys
 		if err := p.Store.PutMessage(rec); err != nil {
 			p.Log.Error("record message", "message", m.Name, "err", err)
@@ -105,6 +115,22 @@ func (p *Pipeline) recordMessages(msgs []chat.Message, opts Options) {
 // review's outcome, no pending entry and no later review depends on it.
 func (p *Pipeline) startMessageReaction(ctx context.Context, trigger string, opts Options) {
 	if !p.reactionsEnabled(opts) || trigger == "" {
+		return
+	}
+	if ctx.Err() != nil {
+		// The context is already done -- a Ctrl-C during a review, which is
+		// the ordinary way to stop the daemon, and reviews run for up to
+		// thirty minutes. Sweep guards its own end-of-sweep pass for exactly
+		// this reason; these inline calls from handle need it just as much.
+		//
+		// Returning here rather than trying and failing is not an
+		// optimisation. Each stage latches its intent in the store before the
+		// call, so a crash cannot produce a second reaction -- but on a dead
+		// context the call cannot possibly succeed, so latching first would
+		// convert a transient interrupt into a permanent one: the message
+		// would keep 👀 for good, never get its result, and never be looked at
+		// again, because the latch says it is finished. Not reacting at all
+		// leaves the work for the next sweep.
 		return
 	}
 	rec, ok, err := p.Store.Message(trigger)
@@ -133,6 +159,10 @@ func (p *Pipeline) startMessageReaction(ctx context.Context, trigger string, opt
 	// discipline as writing a review record as in_flight before claude starts:
 	// the store remembers the intent, so a crash or a failure cannot turn into
 	// a second reaction.
+	//
+	// What that trades away is a reaction lost to a transient failure, which
+	// is why the one transient failure that is not rare -- an interrupt -- is
+	// caught by the context guard above rather than allowed to reach here.
 	rec.WatchApplied = true
 	if err := p.Store.PutMessage(rec); err != nil {
 		p.Log.Error("record watching reaction", "message", trigger, "err", err)
@@ -183,6 +213,22 @@ func (p *Pipeline) startMessageReaction(ctx context.Context, trigger string, opt
 // on a pull request with twenty comments waiting is worse than no reaction.
 func (p *Pipeline) settleMessageReaction(ctx context.Context, trigger string, opts Options) {
 	if !p.reactionsEnabled(opts) || trigger == "" {
+		return
+	}
+	if ctx.Err() != nil {
+		// The context is already done -- a Ctrl-C during a review, which is
+		// the ordinary way to stop the daemon, and reviews run for up to
+		// thirty minutes. Sweep guards its own end-of-sweep pass for exactly
+		// this reason; these inline calls from handle need it just as much.
+		//
+		// Returning here rather than trying and failing is not an
+		// optimisation. Each stage latches its intent in the store before the
+		// call, so a crash cannot produce a second reaction -- but on a dead
+		// context the call cannot possibly succeed, so latching first would
+		// convert a transient interrupt into a permanent one: the message
+		// would keep 👀 for good, never get its result, and never be looked at
+		// again, because the latch says it is finished. Not reacting at all
+		// leaves the work for the next sweep.
 		return
 	}
 	rec, ok, err := p.Store.Message(trigger)
@@ -257,7 +303,9 @@ func (p *Pipeline) settleMessageReaction(ctx context.Context, trigger string, op
 		emoji = EmojiClean
 	}
 
-	// Marked before the call, for the reason given in startMessageReaction.
+	// Marked before the call, for the reason given in startMessageReaction --
+	// including why an already-cancelled context is turned away above instead
+	// of being latched and then failed.
 	rec.ResultApplied = true
 	if err := p.Store.PutMessage(rec); err != nil {
 		p.Log.Error("record result reaction", "message", trigger, "err", err)

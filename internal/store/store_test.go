@@ -198,15 +198,9 @@ func TestMessageRecordLifecycle(t *testing.T) {
 		t.Fatalf("AllMessages() = %+v", all)
 	}
 
-	if err := s.DeleteMessage("spaces/A/messages/m1"); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok, _ := s.Message("spaces/A/messages/m1"); ok {
-		t.Error("a deleted message record must be gone")
-	}
-	if err := s.DeleteMessage("spaces/A/messages/gone"); err != nil {
-		t.Errorf("deleting an absent message key must be a no-op: %v", err)
-	}
+	// No DeleteMessage on purpose: see MessageRecord's doc comment. These
+	// records are the memory of what has already been reacted to, so nothing
+	// prunes them.
 }
 
 // A message record survives a restart, so the 👀 added before a review can

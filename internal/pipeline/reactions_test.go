@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,13 @@ func (f *fakeReactor) note(ctx context.Context) {
 func (f *fakeReactor) AddReaction(ctx context.Context, messageName, emoji string) (string, error) {
 	f.note(ctx)
 	*f.log = append(*f.log, "add:"+emoji+":"+messageName)
+	// Cancellation is honoured because the real reactor cannot do otherwise:
+	// chat.Client drives runner.OS, and exec.CommandContext will not start a
+	// subprocess on a context that is already done. A fake that ignored this
+	// would make an interrupted sweep look survivable when it is not.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if f.addErr != nil {
 		return "", f.addErr
 	}
@@ -63,6 +71,9 @@ func (f *fakeReactor) AddReaction(ctx context.Context, messageName, emoji string
 func (f *fakeReactor) RemoveReaction(ctx context.Context, reactionName string) error {
 	f.note(ctx)
 	*f.log = append(*f.log, "remove:"+reactionName)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if f.removeErr != nil {
 		return f.removeErr
 	}
@@ -145,6 +156,18 @@ func emojis(rc *fakeReactor) []string {
 	var out []string
 	for _, a := range rc.added {
 		out = append(out, a.Emoji)
+	}
+	return out
+}
+
+// emojisOn is emojis narrowed to one message, for the tests where a sweep
+// reacts to more than one.
+func emojisOn(rc *fakeReactor, message string) []string {
+	var out []string
+	for _, a := range rc.added {
+		if a.Message == message {
+			out = append(out, a.Emoji)
+		}
 	}
 	return out
 }
@@ -815,6 +838,319 @@ func TestReplayDoesNotReact(t *testing.T) {
 	}
 	if got := reactionCalls(h); len(got) != 0 {
 		t.Errorf("a replay's trigger is the literal replay marker, not a message name: %v", got)
+	}
+}
+
+// ---- an interrupted sweep must not burn the reaction ----
+
+// Ctrl-C during a review is the ordinary way to stop the daemon, and reviews
+// run for up to thirty minutes, so the sweep context being dead by the time a
+// reaction is attempted is routine rather than exotic.
+//
+// The hazard is the latch. Each stage is marked in the store before the API
+// call so a crash cannot produce a second reaction -- but on a dead context
+// the call cannot possibly succeed, so latching first converts a transient
+// interrupt into a permanent one: the message keeps 👀 forever, never gets its
+// result, and no later sweep will look at it again because the latch says it
+// is done. Sweep already guards its own end-of-sweep pass for exactly this
+// reason; the inline calls from handle need the same guard.
+func TestAnInterruptedSweepDoesNotBurnTheResultReaction(t *testing.T) {
+	// Two messages, so the candidate loop gets another turn after the
+	// interrupt and the sweep reports the cancellation the way a real Ctrl-C
+	// does. aex-a#1 is in the older message, so it is handled first.
+	const m1 = "spaces/A/messages/m1"
+	h, rc := reactHarness(t, []chat.Message{
+		msg("spaces/A/messages/m2", prURL("aex-b", 2)),
+		msg(m1, prURL("aex-a", 1)),
+	})
+
+	// The review succeeds and the operator hits Ctrl-C on the way out -- the
+	// window between Rev.Run returning and the reaction being attempted. A
+	// review runs for up to thirty minutes, so this window is most of the
+	// daemon's life.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.rev.onRun = cancel
+
+	rep, err := h.p.Sweep(ctx, Options{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Sweep err = %v, want context.Canceled", err)
+	}
+	// The review itself completed and was recorded, verdict and all. That is
+	// what makes a missing reaction a bug rather than a review that never
+	// happened.
+	if rep.Reviewed != 1 {
+		t.Fatalf("Reviewed = %d, want 1: %+v", rep.Reviewed, rep.Decisions)
+	}
+	r, ok, err := h.st.Review("example-org/aex-a#1")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if r.Outcome != store.OutcomeReviewed || r.Verdict != store.VerdictApproved {
+		t.Fatalf("record = %q / %q, want reviewed / approved", r.Outcome, r.Verdict)
+	}
+	// And the 👀 did land: it was added before the cancel, so the message is
+	// now showing "being reviewed right now" and needs its result.
+	if got := emojisOn(rc, m1); len(got) != 1 || got[0] != EmojiWatching {
+		t.Fatalf("emojis on %s = %v, want just the watching one", m1, got)
+	}
+
+	rec, ok, err := h.st.Message(m1)
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if rec.ResultApplied {
+		t.Errorf("the result latch must not be set on a dead context: the call cannot succeed, so "+
+			"latching turns a Ctrl-C into a message that keeps 👀 for good (%+v)", rec)
+	}
+
+	// The recovery is the point. A healthy sweep afterwards must deliver the
+	// result reaction and take the 👀 off. aex-a#1 is terminal and will not be
+	// offered again, so this can only arrive through the end-of-sweep pass
+	// over the messages bucket.
+	h.rev.onRun = nil
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := emojisOn(rc, m1); len(got) != 2 || got[1] != EmojiClean {
+		t.Errorf("emojis on %s = %v, want [👀 ✅] once a healthy sweep runs", m1, got)
+	}
+	// m2's own 👀 is removed on this sweep too -- it was reviewed here -- so
+	// this looks for m1's specifically.
+	if !slices.Contains(rc.removed, m1+"/reactions/r1") {
+		t.Errorf("m1's 👀 must come off on the recovery sweep, removed %v", rc.removed)
+	}
+}
+
+func TestAnInterruptedSweepDoesNotBurnTheWatchingReaction(t *testing.T) {
+	h, rc := reactHarness(t, []chat.Message{
+		msg("spaces/A/messages/m1", prURL("aex-a", 1)+"\n"+prURL("aex-b", 2)),
+	})
+
+	// Cancelled where the clone would be: past every gate the sweep applies
+	// up front, and immediately before the 👀 would be added.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.wts.onPrepare = cancel
+
+	if _, err := h.p.Sweep(ctx, Options{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Sweep err = %v, want context.Canceled", err)
+	}
+	rec, ok, err := h.st.Message("spaces/A/messages/m1")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if rec.WatchApplied {
+		t.Errorf("the watch latch must not be set on a dead context, or this message can never "+
+			"get its 👀 (%+v)", rec)
+	}
+	if rec.WatchReaction != "" {
+		t.Errorf("nothing can have been created on a dead context: %+v", rec)
+	}
+
+	// aex-a#1 was killed mid-review, so it is needs_attention and will not be
+	// reviewed again. aex-b#2 never got its turn and still is, and its review
+	// is what puts the 👀 on the message the interrupted sweep failed to mark.
+	if a, _, _ := h.st.Review("example-org/aex-a#1"); a.Outcome != store.OutcomeNeedsAttention {
+		t.Fatalf("aex-a#1 Outcome = %q, want needs_attention: a review killed by the interrupt "+
+			"must not read as one that finished", a.Outcome)
+	}
+	h.wts.onPrepare = nil
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := emojis(rc); len(got) == 0 || got[0] != EmojiWatching {
+		t.Fatalf("emojis = %v, want the 👀 first: the recovery sweep must still be able to add it", got)
+	}
+	if got := emojis(rc); len(got) != 2 || got[1] != EmojiFindings {
+		t.Errorf("emojis = %v, want [👀 💬]: aex-a#1 needs attention, so the message is not clean", got)
+	}
+}
+
+// ---- the wait for every ref to be terminal ----
+
+// An in_flight sibling is not a decided one. recoverInFlight converts these at
+// the top of every writing sweep, but it logs and carries on when the write
+// fails -- so a record really can still be in_flight while another of the same
+// message's refs finishes. Falling through to the "not recognised, be
+// pessimistic" arm would earn the message a premature 💬 while a review of it
+// is still, as far as the store knows, in progress.
+//
+// Called directly: getting a sweep to hold an in_flight record past
+// recoverInFlight needs a store write failure, and there is no seam for one.
+func TestAnInFlightSiblingHoldsTheResultReaction(t *testing.T) {
+	h, rc := reactHarness(t, nil)
+	const m1 = "spaces/A/messages/m1"
+	if err := h.st.PutMessage(store.MessageRecord{
+		Name:          m1,
+		RefKeys:       []string{"example-org/aex-a#1", "example-org/aex-b#2"},
+		WatchApplied:  true,
+		WatchReaction: m1 + "/reactions/r1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.st.PutReview(store.Review{
+		Key: "example-org/aex-a#1", Outcome: store.OutcomeReviewed, Verdict: store.VerdictApproved,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.st.PutReview(store.Review{
+		Key: "example-org/aex-b#2", Outcome: store.OutcomeInFlight,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h.p.settleMessageReaction(context.Background(), m1, Options{})
+	if got := reactionCalls(h); len(got) != 0 {
+		t.Errorf("an in_flight ref is not decided, so the message is not finished: %v", got)
+	}
+
+	// And once it is decided, the reaction lands -- so this is a wait, not a
+	// refusal.
+	if err := h.st.PutReview(store.Review{
+		Key: "example-org/aex-b#2", Outcome: store.OutcomeReviewed, Verdict: store.VerdictApproved,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.p.settleMessageReaction(context.Background(), m1, Options{})
+	if got := emojis(rc); len(got) != 1 || got[0] != EmojiClean {
+		t.Errorf("emojis = %v, want [✅] once the in_flight ref is decided", got)
+	}
+}
+
+// ---- a pause that arrives mid-sweep ----
+
+// Sweep observes the pause file once at the start, and again before each
+// review. A pause that lands after the sweep began therefore shows up only as
+// pausedMidSweep, and the end-of-sweep reaction pass has to honour that as
+// well as the sweep-start reading -- a sweep can run for the better part of
+// two hours, which is plenty of time for `firstpass pause` to be run.
+func TestAPauseArrivingMidSweepStopsTheResultReaction(t *testing.T) {
+	h, rc := reactHarness(t, []chat.Message{
+		msg("spaces/A/messages/m1", prURL("aex-a", 1)+"\n"+prURL("aex-b", 2)),
+	})
+	h.prs.info["example-org/aex-b#2"] = ghpr.PRInfo{State: "OPEN", Author: "colleague", IsDraft: true}
+
+	// First sweep: aex-a#1 is reviewed so the 👀 goes on, aex-b#2 is a draft
+	// so the message is not finished.
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := emojis(rc); len(got) != 1 || got[0] != EmojiWatching {
+		t.Fatalf("emojis = %v, want just the watching one", got)
+	}
+
+	// aex-b#2 finishes in a process that died before it could react, so m1 is
+	// now ready for its result reaction.
+	if err := h.st.PutReview(store.Review{
+		Key: "example-org/aex-b#2", Outcome: store.OutcomeReviewed, Verdict: store.VerdictApproved,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.st.DeletePending("example-org/aex-b#2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second sweep starts unpaused -- so rep.Paused is false and only
+	// pausedMidSweep can hold the reaction back -- and the kill switch is
+	// thrown while the sweep is preparing a worktree for a third PR.
+	h.ch.msgs = []chat.Message{
+		msg("spaces/A/messages/m2", prURL("aex-c", 3)),
+		msg("spaces/A/messages/m1", prURL("aex-a", 1)+"\n"+prURL("aex-b", 2)),
+	}
+	h.seedWatermark(t)
+	h.wts.onPrepare = func() {
+		if err := os.WriteFile(h.cfg.PauseFile(), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := len(reactionCalls(h))
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Paused {
+		t.Fatal("the sweep must have started unpaused, or this tests rep.Paused and not the mid-sweep pause")
+	}
+	if d, _ := decisionFor(rep, "example-org/aex-c#3"); d.Reason != "paused before the review started" {
+		t.Fatalf("the pause must have fired mid-sweep, got %q / %q", d.Action, d.Reason)
+	}
+	if got := reactionCalls(h); len(got) != before {
+		t.Errorf("a pause that lands mid-sweep stops the reactions too: %d calls before, %v after",
+			before, got)
+	}
+
+	// Deferred, not dropped.
+	h.wts.onPrepare = nil
+	if err := os.Remove(h.cfg.PauseFile()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := emojis(rc); len(got) != 2 || got[1] != EmojiClean {
+		t.Errorf("emojis = %v, want [👀 ✅] after the resume", got)
+	}
+}
+
+// ---- a removal that fails ----
+
+// The remove is the one reaction call that had no failure test of its own: the
+// only test setting removeErr also set addErr, so the add failed first and
+// returned before any removal was attempted.
+func TestAFailedRemovalLeavesTheResultReactionInPlace(t *testing.T) {
+	h, rc := reactHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-a", 1))})
+	rc.removeErr = errors.New("chat api 404 NOT_FOUND: reaction not found")
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("a failed removal must not fail the sweep: %v", err)
+	}
+	if rep.Reviewed != 1 {
+		t.Fatalf("Reviewed = %d, want 1: %+v", rep.Reviewed, rep.Decisions)
+	}
+	if r, _, _ := h.st.Review("example-org/aex-a#1"); r.Outcome != store.OutcomeReviewed {
+		t.Errorf("Outcome = %q; a failed removal must not touch the review", r.Outcome)
+	}
+
+	// Both adds went through, and the removal was genuinely attempted -- which
+	// is what the old test could not say.
+	if got := emojis(rc); len(got) != 2 || got[1] != EmojiClean {
+		t.Fatalf("emojis = %v, want [👀 ✅]", got)
+	}
+	var removes int
+	for _, e := range reactionCalls(h) {
+		if strings.HasPrefix(e, "remove:") {
+			removes++
+		}
+	}
+	if removes != 1 {
+		t.Fatalf("the removal must have been attempted exactly once, calls = %v", reactionCalls(h))
+	}
+	if len(rc.removed) != 0 {
+		t.Fatalf("nothing can have been removed, removed = %v", rc.removed)
+	}
+
+	// The result reaction stays marked, so a later sweep does not add a second
+	// one; and the 👀 name stays on record, because it is still on the message.
+	rec, ok, err := h.st.Message("spaces/A/messages/m1")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if !rec.ResultApplied || rec.ResultReaction == "" {
+		t.Errorf("the result reaction landed and must stay recorded: %+v", rec)
+	}
+	if rec.WatchReaction == "" {
+		t.Errorf("the 👀 is still on the message, so its name must not be cleared: %+v", rec)
+	}
+
+	// Rule 4 still holds over the failure: no second result reaction.
+	if _, err := h.p.Sweep(context.Background(), Options{Backfill: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if got := emojis(rc); len(got) != 2 {
+		t.Errorf("emojis = %v, want no third reaction after a failed removal", got)
 	}
 }
 

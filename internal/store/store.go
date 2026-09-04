@@ -123,6 +123,15 @@ type Watermark struct {
 // decide whether a pull request is reviewed: the reviews bucket alone decides
 // that, and a message record that is missing, stale or corrupt can cost a
 // reaction and nothing else.
+//
+// There is deliberately no delete. These records are never pruned, so the
+// bucket grows by one small row per chat message that carried a pull request
+// link -- the same unbounded growth the reviews bucket already has, one row
+// per pull request, and negligible beside it. Pruning settled records would
+// discard the very state that stops a message being reacted to twice, and
+// while the reviews bucket's own dedupe would probably catch that on its own,
+// "probably, via a second mechanism" is not the footing to put an invariant
+// on. Not deleting is the cheaper mistake.
 type MessageRecord struct {
 	Name    string   `json:"name"`
 	RefKeys []string `json:"ref_keys"`
@@ -256,8 +265,6 @@ func (s *Store) Message(name string) (MessageRecord, bool, error) {
 }
 
 func (s *Store) PutMessage(m MessageRecord) error { return s.put(bucketMessages, []byte(m.Name), m) }
-
-func (s *Store) DeleteMessage(name string) error { return s.del(bucketMessages, name) }
 
 func (s *Store) AllMessages() ([]MessageRecord, error) {
 	var out []MessageRecord

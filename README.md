@@ -65,8 +65,18 @@ routinely carries several links and reviews run strictly one at a time, so a
 per-PR reaction would say nothing a reader could act on: the useful statement
 is "this post has been picked up" and then "this post is done with".
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
+- **A sibling PR that is not ready holds the result reaction back.** The
+  result belongs to the message, so it waits until *every* link on that
+  message is finished. A draft posted alongside a reviewable PR is deferred,
+  not decided, and keeps being retried until it is marked ready or its backlog
+  entry expires — up to `pending_max_age`, a week by default. Until then the
+  message keeps 👀 even though the PRs firstpass could review are all done.
+  That is deliberate: one result reaction per message is the whole point, and
+  reacting before the message is finished would mean reacting twice. But it is
+  the state you are most likely to see and misread, so `firstpass status` is
+  the place to look — the draft will be sitting in the deferred list.
 - A message whose every link was skipped — owner not on `allow_owners`, a
   denied repo, merged, closed, a draft, your own PR — gets **no reaction at
   all**. Nothing was reviewed, so there is nothing to report, and a bare ✅

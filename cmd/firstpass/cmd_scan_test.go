@@ -161,3 +161,62 @@ func TestOpenAppWithReviewWiresBothAndHonoursLive(t *testing.T) {
 		t.Error("-live must switch dry_run off")
 	}
 }
+
+// The pipeline refuses to react in a dry run on its own account, but dry_run is
+// the switch the operator trusts with "this cannot touch anybody else's chat",
+// so the wiring declines to hand it a reactor at all. Two independent guards,
+// and this pins the outer one -- a pipeline-level test cannot, because it wires
+// a reactor itself in order to have something to assert against.
+func TestOpenAppWiresNoReactorInADryRun(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(testConfigBody(dir)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dry run, reviewer wired: the one case where a reactor could plausibly be
+	// wanted and must not be.
+	a, err := openApp(cfgPath, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.cfg.DryRun {
+		t.Fatal("dry_run must default to true, or this proves nothing")
+	}
+	if a.pipe.Rev == nil {
+		t.Fatal("the reviewer must be wired, so the nil reactor below is about dry_run alone")
+	}
+	if a.pipe.React != nil {
+		t.Error("a dry run must get no reactor: chat is outward, and dry_run is an absolute " +
+			"no-outward-effect switch")
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Print-only style wiring: no reviewer, so no reactor either.
+	b, err := openApp(cfgPath, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.pipe.React != nil {
+		t.Error("withReview=false must leave the reactor nil too, so no build that cannot review " +
+			"can still post to chat")
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Live and reviewing: the only combination that gets one.
+	c, err := openApp(cfgPath, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if c.cfg.DryRun {
+		t.Fatal("-live must switch dry_run off")
+	}
+	if c.pipe.React == nil {
+		t.Error("a live reviewing run must have a reactor, or the feature is wired off entirely")
+	}
+}

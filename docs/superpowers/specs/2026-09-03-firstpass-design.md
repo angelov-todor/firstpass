@@ -130,7 +130,10 @@ interface with a fake, so `pipeline` tests run without subprocesses.
   path.
 - `pending` — `owner/repo#n` -> `{firstSeen, attempts, lastAttempt, lastReason}`.
 - `messages` — `spaces/.../messages/...` -> `{name, refKeys, firstSeen, watchApplied, watchReaction,
-  resultApplied, resultReaction}`. Added after the tool was already in production, so it is created
+  resultApplied, resultReaction}`. Never pruned, deliberately: there is no delete method at all.
+  The bucket grows one small row per chat message that carried a PR link, beside the `reviews`
+  bucket's one row per PR, and pruning settled rows would discard the very state that stops a
+  message being reacted to twice. Added after the tool was already in production, so it is created
   by `CreateBucketIfNotExists` alongside the other three and an existing database simply gains it.
 
   This bucket exists because the reaction is per message: the result reaction is only correct once
@@ -199,7 +202,9 @@ Two asymmetries are deliberate:
   with comments waiting is worse than no reaction, so an unrecognised outcome takes the pessimistic
   reading too.
 
-The rules, all of them tested:
+The rules. Each is pinned by a test that was checked to fail when its own guard
+is reverted — including the ones that read as belt and braces, because those are the ones a suite
+will happily let rot:
 
 1. **Nothing that was not reviewed is reacted to.** `watchApplied` is the "a review actually
    started" flag, and no `watchApplied` means no result reaction either — so a message whose every
@@ -214,6 +219,15 @@ The rules, all of them tested:
    the same discipline as writing a review record as `in_flight` before `claude` starts: an
    outward act that might be repeated is worse than one that is occasionally missed, and a reaction
    is cosmetic either way. A backfill or a watermark gap re-offering the message changes nothing.
+
+   What that trades away is a reaction lost to a transient failure — so the one transient failure
+   that is not rare is caught before the latch. **An already-cancelled context reacts to nothing.**
+   Ctrl-C during a review is how the daemon is normally stopped and a review runs for up to thirty
+   minutes, so a dead context by the time a reaction is attempted is routine. The call cannot
+   succeed on one, so latching first would turn a transient interrupt into a permanent one: the
+   message would keep 👀 for good, never get its result, and never be looked at again, because the
+   latch says it is finished. `Sweep` guards its own end-of-sweep pass the same way; both inline
+   calls from `handle` do too, and a later healthy sweep picks the work up.
 3. **A reaction failure never touches a review.** It is logged and dropped: no `needs_attention`, no
    pending entry, no held watermark, and the next review runs exactly as before.
 4. **`dry_run` and `-print-only` react to nothing**, and record no reaction state either. A `PAUSE`
@@ -304,7 +318,7 @@ Test-driven throughout. The decision logic is I/O-free, so most tests need no su
   would require guessing a repo.
 - **`chat`** — golden files of real `get-messages` output, including one fixture carrying the
   `Access token expired, refreshing...` prefix ahead of the JSON.
-- **`pipeline`** — fakes for `chat`, `ghpr` and `review`. Covers the full decision table: skip own,
+- **`pipeline`** — fakes for `chat`, `ghpr`, `review` and the chat reactor. Covers the full decision table: skip own,
   draft to `pending`, merged terminal, owner not in `allow_owners`, in-batch dedupe, per-sweep cap,
   `PAUSE` file (including that it does not increment `attempts`), cold start reviewing nothing,
   timeout landing on `needs_attention` rather than retrying, and the watermark advancing only after
