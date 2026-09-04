@@ -35,6 +35,12 @@ func fixtureOrigin(t *testing.T) string {
 	run("init", "-q", "-b", "main")
 	run("config", "user.email", "test@example.com")
 	run("config", "user.name", "Test")
+	// A developer with commit.gpgsign=true globally would otherwise have these
+	// throwaway fixture commits demand a GPG passphrase. With no terminal to
+	// prompt on, `git commit` does not fail — it blocks, so the whole package
+	// hangs until the test binary's timeout rather than reporting anything
+	// useful. A test fixture must not depend on the machine's signing state.
+	run("config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
