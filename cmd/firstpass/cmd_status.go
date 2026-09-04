@@ -45,6 +45,31 @@ func cmdStatus(args []string) error {
 	return nil
 }
 
+// outcomeCell is the OUTCOME column: the outcome, and for a review the
+// verdict firstpass submitted with it.
+//
+// A bare "reviewed" is what the operator was reading for a clean pull request
+// that said nothing at all, so every verdict state gets its own string. In
+// particular "reviewed / approved" (submitted) must not be confusable with
+// "reviewed / no verdict" (a dry run, or a submission that failed -- Detail
+// says which) or "reviewed / verdict unknown" (the reviewer never said).
+func outcomeCell(r store.Review) string {
+	switch {
+	case r.Verdict == store.VerdictApproved:
+		return string(r.Outcome) + " / approved"
+	case r.Verdict == store.VerdictFindings:
+		return string(r.Outcome) + " / findings"
+	case r.Verdict == store.VerdictUnknown:
+		return string(r.Outcome) + " / verdict unknown"
+	case r.Outcome == store.OutcomeReviewed:
+		// Only reviews carry a verdict, so only a review's absence of one is
+		// worth a word. A skipped or deferred row is left exactly as it was.
+		return string(r.Outcome) + " / no verdict"
+	default:
+		return string(r.Outcome)
+	}
+}
+
 func renderStatus(w io.Writer, reviews []store.Review, pending []store.Pending,
 	wm store.Watermark, hasWM, paused, dryRun bool) {
 
@@ -98,7 +123,7 @@ func renderStatus(w io.Writer, reviews []store.Review, pending []store.Pending,
 			if r.Outcome == store.OutcomeInFlight {
 				inFlight++
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Key, r.Outcome, decided, took, exit, r.Detail)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Key, outcomeCell(r), decided, took, exit, r.Detail)
 		}
 		tw.Flush()
 		if actionable > 0 {
