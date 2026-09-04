@@ -89,7 +89,68 @@ type Review struct {
 	// PreviousHeadSHA is the commit the pass before this one reviewed, so a
 	// second pass does not lose the commit whose comments are already on the
 	// pull request. Empty on a first pass.
+	//
+	// It is redundant with the last-but-one entry of ReviewedSHAs and is kept
+	// anyway: it is what makes a row written before ReviewedSHAs existed
+	// decode into a usable set (see ReviewedCommits), and the reviewer is told
+	// about this one commit specifically rather than about the whole set.
 	PreviousHeadSHA string `json:"previous_head_sha,omitempty"`
+	// ReviewedSHAs is every commit a pass of this review has reviewed, oldest
+	// first, with the current HeadSHA last. Read it through ReviewedCommits.
+	//
+	// It exists because HeadSHA alone is the *last* pass's commit, and "no
+	// pull request is reviewed twice for the same commit" is a statement about
+	// all of them. A head force-pushed back to any earlier reviewed commit
+	// compares unequal to HeadSHA, so a single-scalar check would review it
+	// again and post a second copy of that pass's comments onto the very lines
+	// that already carry them -- the headline invariant failing in exactly the
+	// way it exists to prevent.
+	//
+	// It grows by one 40-character string per pass, and a pass needs a re-post
+	// with new commits, so the growth is bounded by how often a team re-posts
+	// one pull request. omitempty for the same reason as Pass: a row with
+	// nothing to say must look like the rows already on disk.
+	ReviewedSHAs []string `json:"reviewed_shas,omitempty"`
+}
+
+// ReviewedCommits is every commit a pass of this review has reviewed, oldest
+// first.
+//
+// A row written before ReviewedSHAs existed has the set derived from the two
+// SHAs it does carry, so an existing record behaves correctly rather than
+// letting its first pass's commit back through. That derivation is why
+// PreviousHeadSHA is kept despite being redundant on new rows.
+func (r Review) ReviewedCommits() []string {
+	if len(r.ReviewedSHAs) > 0 {
+		return r.ReviewedSHAs
+	}
+	var out []string
+	if r.PreviousHeadSHA != "" {
+		out = append(out, r.PreviousHeadSHA)
+	}
+	if r.HeadSHA != "" {
+		out = append(out, r.HeadSHA)
+	}
+	return out
+}
+
+// HasReviewedCommit reports whether a pass of this review has already reviewed
+// the given commit -- and therefore whether its comments may already be on
+// those exact lines.
+//
+// An empty sha is never reviewed. Not knowing what the head is cannot be
+// allowed to read as "we have seen it", and it cannot read as "we have not"
+// either: the caller has to establish the head before asking.
+func (r Review) HasReviewedCommit(sha string) bool {
+	if sha == "" {
+		return false
+	}
+	for _, s := range r.ReviewedCommits() {
+		if s == sha {
+			return true
+		}
+	}
+	return false
 }
 
 // PassNumber is how many reviews firstpass has run on this pull request,

@@ -81,3 +81,87 @@ func TestPassZeroIsOmittedOnDisk(t *testing.T) {
 		t.Errorf("a later pass must record both: %s", b)
 	}
 }
+
+// The commit set. HeadSHA alone is the *last* pass's commit, so comparing only
+// against it lets a head force-pushed back to any earlier reviewed commit
+// through -- onto lines that already carry that pass's comments.
+func TestReviewedCommitsIsEveryCommitAPassHasReviewed(t *testing.T) {
+	r := Review{
+		Key: "o/r#1", Outcome: OutcomeReviewed, Pass: 3,
+		HeadSHA: "ccc", PreviousHeadSHA: "bbb",
+		ReviewedSHAs: []string{"aaa", "bbb", "ccc"},
+	}
+	for _, sha := range []string{"aaa", "bbb", "ccc"} {
+		if !r.HasReviewedCommit(sha) {
+			t.Errorf("HasReviewedCommit(%q) = false; every pass's commit counts, not just the last",
+				sha)
+		}
+	}
+	if r.HasReviewedCommit("ddd") {
+		t.Error("HasReviewedCommit(\"ddd\") = true; that commit has never been reviewed")
+	}
+	if r.HasReviewedCommit("") {
+		t.Error("an unknown head must never count as reviewed")
+	}
+}
+
+// A row written before the field existed. Deriving the set from the two SHAs it
+// does carry is what makes an existing record behave correctly rather than
+// letting its first pass's commit through.
+func TestReviewedCommitsFallsBackToTheTwoRecordedSHAs(t *testing.T) {
+	legacy := `{"key":"o/r#1","outcome":"reviewed","head_sha":"ccc","previous_head_sha":"bbb",` +
+		`"pass":2,"started_at":"2026-09-03T12:00:00Z","decided_at":"2026-09-03T12:12:00Z"}`
+	var r Review
+	if err := json.Unmarshal([]byte(legacy), &r); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.ReviewedCommits(); len(got) != 2 || got[0] != "bbb" || got[1] != "ccc" {
+		t.Errorf("ReviewedCommits() = %v, want [bbb ccc] derived from the two recorded SHAs", got)
+	}
+	for _, sha := range []string{"bbb", "ccc"} {
+		if !r.HasReviewedCommit(sha) {
+			t.Errorf("HasReviewedCommit(%q) = false on a pre-existing row", sha)
+		}
+	}
+	if r.HasReviewedCommit("aaa") {
+		t.Error("a commit the row knows nothing about must not count as reviewed")
+	}
+}
+
+// A first-pass row, old or new, has exactly one reviewed commit.
+func TestReviewedCommitsOnAFirstPassRow(t *testing.T) {
+	old := Review{Key: "o/r#1", Outcome: OutcomeReviewed, HeadSHA: "aaa"}
+	if got := old.ReviewedCommits(); len(got) != 1 || got[0] != "aaa" {
+		t.Errorf("ReviewedCommits() = %v, want [aaa]", got)
+	}
+	none := Review{Key: "o/r#2", Outcome: OutcomeSkippedState}
+	if got := none.ReviewedCommits(); len(got) != 0 {
+		t.Errorf("ReviewedCommits() = %v, want empty: nothing was ever reviewed", got)
+	}
+}
+
+func TestReviewedSHAsRoundTripAndAreOmittedWhenEmpty(t *testing.T) {
+	s := openAt(t, t.TempDir())
+	const key = "Example-Org/aex-balances#12"
+	if err := s.PutReview(Review{
+		Key: key, Outcome: OutcomeReviewed, HeadSHA: "ccc", Pass: 3,
+		ReviewedSHAs: []string{"aaa", "bbb", "ccc"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.Review(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ReviewedSHAs) != 3 || got.ReviewedSHAs[2] != "ccc" {
+		t.Errorf("ReviewedSHAs = %v, want the whole set in order", got.ReviewedSHAs)
+	}
+	b, err := json.Marshal(Review{Key: key, Outcome: OutcomeReviewed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "reviewed_shas") {
+		t.Errorf("an empty set must not be written, so a pre-existing row and a fresh one with "+
+			"nothing to say are the same shape: %s", b)
+	}
+}

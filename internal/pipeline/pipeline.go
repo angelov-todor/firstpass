@@ -154,18 +154,48 @@ func inFlightDetail(ref prref.PRRef) string {
 // usual one: no first-pass evidence, no automatic second pass. `firstpass
 // replay` still works, and says the operator meant it.
 //
-// Condition 2: the trigger is a different, non-empty chat message.
+// Condition 2: the trigger is a different, non-empty chat message, posted
+// after the review finished.
 //
-// This is what tells a genuine re-post from the two things that look like one.
+// The name inequality is the cheap first filter and it kills the
+// same-message-in-window case outright. It is not sufficient on its own,
+// because it answers the wrong question: what has to be established is "this
+// post came after we reviewed it", and two names differing does not say that.
+//
+// A watermark gap and a `scan -backfill N` both re-offer posts that are older
+// than the review -- chat.Client returns the whole window when the watermark
+// has fallen out of it and Sweep deliberately processes all of it, and a
+// backfill ignores the watermark by design -- while candidates() takes the
+// *oldest* message carrying a ref and the record holds the newest one seen. So
+// the names differ, and if the head has moved for any reason at all, an
+// ordinary push nobody re-posted becomes a full second comment set and a
+// submitted verdict on a colleague's pull request. Invisibly, too: the older
+// message's reaction latches are already set, so no 👀 and no result reaction
+// appear to give it away. "A laptop closed over a weekend" is enough to
+// produce the gap, and this is a daemon on a laptop.
+//
+// The time comparison subsumes all three cases at once. A gap re-scan and a
+// backfill offer posts older than the review, so both are suppressed; a
+// genuine re-post is newer, so it passes.
+//
+// DecidedAt rather than StartedAt, and strictly after rather than at: a post
+// landing while the review was still running, or at the very moment it
+// finished, cannot have been prompted by its result. Declining it is the
+// fail-safe direction and costs nothing, because the next re-post is newer and
+// does trigger. A record with no DecidedAt at all is refused for the same
+// reason its missing head SHA is: nothing can establish the ordering, and
+// unknown must not read as satisfied.
+//
 // The same message can still be sitting in the fifty-message fetch window on
 // the next sweep -- a backfill, or a watermark gap, will offer it again -- and
 // re-reviewing on that would review a pull request once per sweep forever. A
 // ref re-offered out of the pending bucket carries no trigger at all, because
 // pending is keyed by pull request rather than by post, so an empty trigger is
 // never a re-post either.
-func secondPassDue(prev store.Review, trigger string) bool {
+func secondPassDue(prev store.Review, trigger string, postedAt time.Time) bool {
 	return prev.Outcome == store.OutcomeReviewed && prev.HeadSHA != "" &&
-		trigger != "" && trigger != prev.TriggerMessage
+		trigger != "" && trigger != prev.TriggerMessage &&
+		!prev.DecidedAt.IsZero() && postedAt.After(prev.DecidedAt)
 }
 
 // noteRetrigger records that a re-post was seen and had nothing new in it, by
@@ -305,6 +335,11 @@ type Pipeline struct {
 type candidate struct {
 	ref     prref.PRRef
 	trigger string
+	// triggerAt is when that message was posted, which is what tells a
+	// genuine re-post from a sweep re-reading its own past -- a watermark gap
+	// or a backfill offers messages older than the review they triggered. Zero
+	// for a candidate with no chat message behind it.
+	triggerAt time.Time
 	// previous is the record of a pass that has already reviewed this pull
 	// request, carried in rather than read by handle. Only ReviewOne sets it:
 	// a replay bypasses the record gate, which is where every other candidate
@@ -558,7 +593,7 @@ func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
 				continue
 			}
 			seen[ref.Key()] = true
-			out = append(out, candidate{ref: ref, trigger: msgs[i].Name})
+			out = append(out, candidate{ref: ref, trigger: msgs[i].Name, triggerAt: msgs[i].CreateTime})
 		}
 	}
 
@@ -668,7 +703,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 				// decided" here would read as a PR that was dealt with cleanly.
 				return dec(ActionNeedsAttention, inFlightReason)
 			}
-			if !secondPassDue(prev, c.trigger) {
+			if !secondPassDue(prev, c.trigger, c.triggerAt) {
 				return dec(ActionSkip, "already decided: "+string(prev.Outcome))
 			}
 			// Conditions 1 and 2 hold: a reviewed record, re-posted by a
@@ -758,13 +793,24 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// reviewed would be skipped as "no new commits", which is the one thing
 	// `firstpass replay` must never do: getting past the dedupe is the whole
 	// point of the command, and the operator named this pull request.
-	if !opts.replay && previous != nil && info.HeadSHA == previous.HeadSHA {
+	//
+	// The question is asked of every commit any pass has reviewed, not just
+	// the last one. HeadSHA alone is the most recent pass's commit, so a head
+	// force-pushed back to an earlier reviewed commit compares unequal to it
+	// and would be reviewed again -- posting a second copy of that pass's
+	// comments onto the exact lines that already carry them, which is the
+	// headline invariant failing in the one way it exists to prevent.
+	if !opts.replay && previous != nil && previous.HasReviewedCommit(info.HeadSHA) {
 		// The trigger is updated so the same re-post is not re-inspected on
 		// every sweep for as long as it sits in the fetch window. Nothing else
 		// on the record moves: nothing else happened.
 		note(p.noteRetrigger(*previous, c.trigger, opts))
-		return dec(ActionSkip, "re-posted with no new commits since "+
-			review.ShortSHA(previous.HeadSHA))
+		if info.HeadSHA == previous.HeadSHA {
+			return dec(ActionSkip, "re-posted with no new commits since "+
+				review.ShortSHA(previous.HeadSHA))
+		}
+		return dec(ActionSkip, "re-posted at "+review.ShortSHA(info.HeadSHA)+
+			", which an earlier pass already reviewed: no new commits to review")
 	}
 	if info.State != "OPEN" {
 		note(p.terminalSkip(ref, previous, store.OutcomeSkippedState, c.trigger, "state "+info.State, opts))
@@ -820,6 +866,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		TriggerMessage: c.trigger,
 		StartedAt:      started,
 		Pass:           1,
+		ReviewedSHAs:   []string{info.HeadSHA},
 	}
 	// prevPass is what the reviewer is told. Its Incomplete flag is the
 	// difference between "that pass posted its findings" and "that pass died
@@ -834,6 +881,9 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		// about so it does not restate that pass's findings.
 		rec.Pass = previous.PassNumber() + 1
 		rec.PreviousHeadSHA = previous.HeadSHA
+		// Appended to a copy, never to the decoded slice in place: the record
+		// this came from is read again below on the failure paths.
+		rec.ReviewedSHAs = append(append([]string{}, previous.ReviewedCommits()...), info.HeadSHA)
 		prevPass = &review.PreviousPass{
 			HeadSHA:    previous.HeadSHA,
 			Incomplete: previous.Outcome != store.OutcomeReviewed,

@@ -156,7 +156,7 @@ func TestARepostWithNoNewCommitsIsSkippedAndOnlyTheTriggerIsUpdated(t *testing.T
 	}
 	want := seeded
 	want.TriggerMessage = rePost
-	if rec != want {
+	if !reviewsEqual(rec, want) {
 		t.Errorf("record =\n %+v\nwant only TriggerMessage changed:\n %+v", rec, want)
 	}
 }
@@ -266,7 +266,7 @@ func TestNeedsAttentionIsNeverRetriedByARepost(t *testing.T) {
 			"head SHA is not allowed to be part of that decision", h.prs.inspected)
 	}
 	got, _, _ := h.st.Review(secondPassKey)
-	if got != rec {
+	if !reviewsEqual(got, rec) {
 		t.Errorf("record =\n %+v\nwant untouched:\n %+v", got, rec)
 	}
 }
@@ -308,7 +308,7 @@ func TestASkippedOutcomeIsNeverSecondPassed(t *testing.T) {
 			if len(h.rev.ran) != 0 {
 				t.Fatalf("ran = %v; only a `reviewed` record can be followed by a second pass", h.rev.ran)
 			}
-			if got, _, _ := h.st.Review(secondPassKey); got != rec {
+			if got, _, _ := h.st.Review(secondPassKey); !reviewsEqual(got, rec) {
 				t.Errorf("record =\n %+v\nwant untouched:\n %+v", got, rec)
 			}
 		})
@@ -341,7 +341,7 @@ func TestPrintOnlyOnARepostWithNewCommitsWouldReviewAndWritesNoState(t *testing.
 	if len(h.rev.ran) != 0 {
 		t.Fatalf("ran = %v; print-only reviews nothing", h.rev.ran)
 	}
-	if got, _, _ := h.st.Review(secondPassKey); got != seeded {
+	if got, _, _ := h.st.Review(secondPassKey); !reviewsEqual(got, seeded) {
 		t.Errorf("record =\n %+v\nwant untouched by a print-only sweep:\n %+v", got, seeded)
 	}
 }
@@ -357,7 +357,7 @@ func TestPrintOnlyOnARepostWithNoNewCommitsWritesNoState(t *testing.T) {
 	if _, err := h.p.Sweep(context.Background(), Options{PrintOnly: true}); err != nil {
 		t.Fatal(err)
 	}
-	if got, _, _ := h.st.Review(secondPassKey); got != seeded {
+	if got, _, _ := h.st.Review(secondPassKey); !reviewsEqual(got, seeded) {
 		t.Errorf("record =\n %+v\nwant untouched:\n %+v", got, seeded)
 	}
 }
@@ -472,7 +472,7 @@ func TestAReviewedRecordWithNoHeadSHAIsNeverSecondPassed(t *testing.T) {
 	if len(h.prs.inspected) != 0 {
 		t.Errorf("Inspect called for %v; this is decidable at the record gate", h.prs.inspected)
 	}
-	if got, _, _ := h.st.Review(secondPassKey); got != rec {
+	if got, _, _ := h.st.Review(secondPassKey); !reviewsEqual(got, rec) {
 		t.Errorf("record =\n %+v\nwant untouched:\n %+v", got, rec)
 	}
 }

@@ -31,7 +31,7 @@ func assertRecordIntact(t *testing.T, h *harness, want store.Review) {
 	if !ok {
 		t.Fatal("the record of the pass that reviewed this pull request is gone entirely")
 	}
-	if got == want {
+	if reviewsEqual(got, want) {
 		return
 	}
 	t.Errorf("record was rewritten:\n got %+v\nwant %+v", got, want)
