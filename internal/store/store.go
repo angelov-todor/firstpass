@@ -108,11 +108,55 @@ type Watermark struct {
 	CreateTime  time.Time `json:"create_time"`
 }
 
+// MessageRecord is what one chat message carried, kept so the chat reaction
+// firstpass puts on that message can be completed by a later sweep -- or a
+// later process.
+//
+// It exists because the reaction is per message, not per pull request: a
+// single message routinely carries several PR links, reviews run strictly one
+// at a time, and the result reaction is only right once every one of them has
+// reached a terminal outcome. That can be hours later, by which time the
+// message has scrolled out of the fetch window and the daemon may have been
+// restarted, so neither the ref list nor the reaction name can live in memory.
+//
+// Every field here is additional state. Nothing in this record is ever read to
+// decide whether a pull request is reviewed: the reviews bucket alone decides
+// that, and a message record that is missing, stale or corrupt can cost a
+// reaction and nothing else.
+type MessageRecord struct {
+	Name    string   `json:"name"`
+	RefKeys []string `json:"ref_keys"`
+	// No omitempty: it is inert on a struct type, so the encoder emits the
+	// zero time either way.
+	FirstSeen time.Time `json:"first_seen"`
+
+	// WatchApplied records that the 👀 add was attempted, and is the signal
+	// that at least one of this message's pull requests actually started being
+	// reviewed. It is set before the API call, not after: an outward act that
+	// might be repeated is worse than one that is occasionally missed, which
+	// is the same discipline as writing a Review as in_flight before claude
+	// starts.
+	//
+	// WatchReaction is the name the API returned, and the only handle for
+	// removing the reaction again. It stays empty when the add failed, which
+	// is why "has a review started" asks WatchApplied and "is there a 👀 to
+	// remove" asks WatchReaction.
+	WatchApplied  bool   `json:"watch_applied"`
+	WatchReaction string `json:"watch_reaction,omitempty"`
+
+	// ResultApplied records that the ✅ / 💬 add was attempted, and is what
+	// stops a second result reaction on the same message. Set before the call
+	// for the same reason as WatchApplied.
+	ResultApplied  bool   `json:"result_applied"`
+	ResultReaction string `json:"result_reaction,omitempty"`
+}
+
 var (
-	bucketMeta    = []byte("meta")
-	bucketReviews = []byte("reviews")
-	bucketPending = []byte("pending")
-	keyWatermark  = []byte("watermark")
+	bucketMeta     = []byte("meta")
+	bucketReviews  = []byte("reviews")
+	bucketPending  = []byte("pending")
+	bucketMessages = []byte("messages")
+	keyWatermark   = []byte("watermark")
 )
 
 // Store is a bbolt-backed record of past decisions.
@@ -128,7 +172,12 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketReviews, bucketPending} {
+		// CreateBucketIfNotExists, not CreateBucket: firstpass was already
+		// running in production when the messages bucket was added, so the
+		// database on disk has the other three and not this one. Store.get
+		// dereferences tx.Bucket() without a nil check, so an absent bucket
+		// would panic rather than read as empty.
+		for _, b := range [][]byte{bucketMeta, bucketReviews, bucketPending, bucketMessages} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -194,6 +243,31 @@ func (s *Store) AllPending() ([]Pending, error) {
 				return err
 			}
 			out = append(out, p)
+			return nil
+		})
+	})
+	return out, err
+}
+
+func (s *Store) Message(name string) (MessageRecord, bool, error) {
+	var m MessageRecord
+	ok, err := s.get(bucketMessages, []byte(name), &m)
+	return m, ok, err
+}
+
+func (s *Store) PutMessage(m MessageRecord) error { return s.put(bucketMessages, []byte(m.Name), m) }
+
+func (s *Store) DeleteMessage(name string) error { return s.del(bucketMessages, name) }
+
+func (s *Store) AllMessages() ([]MessageRecord, error) {
+	var out []MessageRecord
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketMessages).ForEach(func(_, v []byte) error {
+			var m MessageRecord
+			if err := json.Unmarshal(v, &m); err != nil {
+				return err
+			}
+			out = append(out, m)
 			return nil
 		})
 	})
