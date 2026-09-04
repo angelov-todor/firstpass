@@ -155,6 +155,68 @@ func TestKilledReviewDoesNotRecordExitZero(t *testing.T) {
 	}
 }
 
+// A killed review's detail must describe damage that is actually possible. A
+// dry run withholds --comment, so posting cannot have happened, and saying it
+// might have both sends the operator hunting for nothing and contradicts
+// review.ReportError's own "nothing was posted, so it is safe to replay" for
+// two different failures of the same dry run.
+func TestKilledDryRunDoesNotWarnThatCommentsMayBePosted(t *testing.T) {
+	h := newHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-balances", 12))})
+	h.seedWatermark(t)
+	if !h.cfg.DryRun {
+		t.Fatal("dry_run must be the default; this test is about the dry-run path")
+	}
+	h.rev.err = context.DeadlineExceeded
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok, _ := h.st.Review("example-org/aex-balances#12")
+	if !ok {
+		t.Fatal("no record")
+	}
+	if strings.Contains(rec.Detail, "may be partially posted") {
+		t.Errorf("a dry run withholds --comment, so it cannot have posted anything: %q", rec.Detail)
+	}
+	if !strings.Contains(rec.Detail, "dry run") {
+		t.Errorf("the detail must say this was a dry run, so the operator knows nothing is on the PR: %q",
+			rec.Detail)
+	}
+	if rec.Outcome != store.OutcomeNeedsAttention {
+		t.Errorf("Outcome = %q; a killed review is still not a review", rec.Outcome)
+	}
+	if rec.ExitCode != ExitUnknown {
+		t.Errorf("ExitCode = %d, want ExitUnknown (%d): killed is killed either way",
+			rec.ExitCode, ExitUnknown)
+	}
+}
+
+// The other half: live, the warning is load-bearing. claude posts comments one
+// at a time, so a run killed part-way through really may have left some on a
+// colleague's pull request -- which is why it is never retried automatically.
+func TestKilledLiveReviewStillWarnsThatCommentsMayBePosted(t *testing.T) {
+	h := newHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-balances", 12))})
+	h.seedWatermark(t)
+	h.cfg.DryRun = false
+	h.apply()
+	h.rev.err = context.DeadlineExceeded
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok, _ := h.st.Review("example-org/aex-balances#12")
+	if !ok {
+		t.Fatal("no record")
+	}
+	if !strings.Contains(rec.Detail, "comments may be partially posted") {
+		t.Errorf("a killed live review may have posted part of a comment set, and the operator has "+
+			"to be told: %q", rec.Detail)
+	}
+	if strings.Contains(rec.Detail, "safe to replay") {
+		t.Errorf("replaying a live review that may have half-posted is not safe: %q", rec.Detail)
+	}
+}
+
 func TestNonZeroClaudeExitIsPreserved(t *testing.T) {
 	h := newHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-balances", 12))})
 	h.seedWatermark(t)

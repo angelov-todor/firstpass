@@ -137,7 +137,7 @@ func TestDeletePendingOnAbsentKeyIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestReviewsAndDeleteReview(t *testing.T) {
+func TestReviews(t *testing.T) {
 	s := openAt(t, t.TempDir())
 	if err := s.PutReview(Review{Key: "o/r#1", Outcome: OutcomeReviewed}); err != nil {
 		t.Fatal(err)
@@ -152,12 +152,5 @@ func TestReviewsAndDeleteReview(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("Reviews() = %d entries, want 2", len(all))
-	}
-
-	if err := s.DeleteReview("o/r#1"); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok, _ := s.Review("o/r#1"); ok {
-		t.Error("DeleteReview must clear the record so replay can re-review")
 	}
 }

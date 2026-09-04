@@ -24,10 +24,17 @@ type check struct {
 const (
 	// doctorCheckTimeout bounds one external dependency, not the whole
 	// command, so a slow one cannot mask the others.
-	doctorCheckTimeout = 20 * time.Second
+	//
+	// 30s, not 20s: `claude --version` and `gh auth status` are node and Go
+	// binaries that hit the network on a cold Windows box, behind a virus
+	// scanner that sees each of them for the first time. Slow-but-working is
+	// the common case there, and reporting a false failure from doctor -- the
+	// one command whose whole job is to say whether the dependencies are
+	// healthy -- is worse than waiting another ten seconds for the truth.
+	doctorCheckTimeout = 30 * time.Second
 	// doctorOverallTimeout keeps the command itself bounded: four sequential
-	// checks at doctorCheckTimeout each fit inside it with room to spare, and
-	// nothing can run longer than this in total.
+	// checks at doctorCheckTimeout each (4 x 30s) fit inside it with room to
+	// spare, and nothing can run longer than this in total.
 	doctorOverallTimeout = 2 * time.Minute
 )
 

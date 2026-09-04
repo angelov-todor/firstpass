@@ -34,10 +34,22 @@ func (r realTicker) Stop()               { r.t.Stop() }
 // progressRenderer renders pipeline.Event values as plain, single-line text
 // -- no progress bars, no colour, no ANSI cursor movement, because this runs
 // under Task Scheduler and in redirected logs at least as often as in a
-// terminal. It writes to whatever io.Writer it is given; cmdScan, cmdReplay
-// and cmdWatch are what decide that this is always os.Stderr, never
-// os.Stdout, since the decision table and status table are stdout output an
-// operator may redirect to a file.
+// terminal. It writes to whatever io.Writer it is given; cmdScan and
+// cmdReplay are what decide that this is always os.Stderr, never os.Stdout,
+// since the decision table and status table are stdout output an operator may
+// redirect to a file. (cmdWatch builds no renderer at all: it routes events
+// through slogProgressHandler instead.)
+//
+// A renderer is NOT safe for concurrent use, and neither is Handle. The
+// heartbeat is guarded by nothing: two overlapping stopHeartbeat calls would
+// both close(stop) and panic, and two overlapping startHeartbeat calls would
+// leak the first goroutine, which then prints over the second. It is safe
+// today only because the pipeline is strictly serial -- one sweep, one review
+// at a time -- and emits no other event between review_started and
+// review_finished, so Handle is only ever entered from one goroutine and the
+// heartbeat's lifetime never overlaps another's. Whoever parallelises reviews
+// must give this a mutex (or a renderer per worker) in the same change; see
+// the note on pipeline.Pipeline.Progress.
 type progressRenderer struct {
 	w             io.Writer
 	reviewTimeout time.Duration
@@ -141,9 +153,10 @@ func (r *progressRenderer) startHeartbeat(ref prref.PRRef, idx, total int) {
 }
 
 // stopHeartbeat is a no-op when no heartbeat is running, so every exit path
-// -- review_finished, a deferred safety-net call in cmdScan/cmdReplay/
-// cmdWatch, or a second call from startHeartbeat's defensive reset -- can
-// call it unconditionally.
+// -- review_finished, a deferred safety-net call in cmdScan or cmdReplay, or
+// a second call from startHeartbeat's defensive reset -- can call it
+// unconditionally. It must be called from one goroutine only: two concurrent
+// calls would both close(stop) and panic. See progressRenderer.
 func (r *progressRenderer) stopHeartbeat() {
 	if r.stopHB == nil {
 		return

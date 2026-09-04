@@ -56,12 +56,12 @@ actually see named spaces).
 ## Commands
 
 - `scan` — one sweep, then exit. Flags: `-print-only`, `-backfill N`,
-  `-live`. Also the intended Task Scheduler entry point.
+  `-live`, `-quiet`. Also the intended Task Scheduler entry point.
 - `watch` — sweep on a ticker until interrupted. Flag: `-live`.
 - `status` — print the review table: what's been reviewed, skipped, or
   deferred.
 - `replay <pr-url | owner/repo#n>` — force one PR through review again,
-  ignoring the dedupe record. Flag: `-live`.
+  ignoring the dedupe record. Flags: `-live`, `-quiet`.
 - `doctor` — preflight every external dependency.
 - `pause` / `resume` — write / remove a kill-switch file. While paused,
   sweeps still queue new PRs but run no reviews and post nothing.

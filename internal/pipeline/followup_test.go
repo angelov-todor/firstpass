@@ -384,12 +384,23 @@ func TestPendingReadFailureHoldsTheWatermark(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	h.st, h.p.Store = st, st
 
-	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
 		t.Fatal(err)
 	}
 	wm, _, _ := h.st.Watermark()
 	if wm.MessageName != "spaces/A/messages/m0" {
 		t.Errorf("watermark = %q; a failing store read must hold it, exactly as a failing write does",
 			wm.MessageName)
+	}
+	// Holding the watermark only guarantees the ref is offered again. The read
+	// failure also leaves this ref's age and attempt count unknown, so this
+	// sweep must decline to review it rather than spend thirty minutes and a
+	// comment set on a ref the budgets may already have given up on.
+	if len(h.rev.ran) != 0 {
+		t.Errorf("a failing pending read must defer the ref, not review it: ran %v", h.rev.ran)
+	}
+	if d, found := decisionFor(rep, key); !found || d.Action != ActionDefer {
+		t.Errorf("decision = %+v (found=%v), want defer: pending read failed", d, found)
 	}
 }

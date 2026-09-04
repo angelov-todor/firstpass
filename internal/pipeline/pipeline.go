@@ -160,6 +160,15 @@ type Pipeline struct {
 	// show the operator that a long review is working rather than wedged. It
 	// must not block; the CLI renders it. Left nil, nothing about progress
 	// reporting changes for the caller: every call site guards it.
+	//
+	// It is called from one goroutine only, and the events for one review
+	// arrive strictly in order: review_started is always followed by that
+	// review's review_finished with no other event in between, because a
+	// sweep reviews one PR at a time. The CLI's renderer relies on both
+	// guarantees -- its heartbeat is started and stopped by that pair and is
+	// protected by no lock at all. Anything that makes reviews concurrent must
+	// either serialise the calls into this hook or make every renderer safe
+	// for concurrent use in the same change.
 	Progress func(Event)
 }
 
@@ -529,7 +538,18 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// must not retire it out from under them.
 	if !opts.replay {
 		expired, err := p.expirePending(ref, opts)
-		note(err)
+		if err != nil {
+			// Deferred, exactly as the Store.Review read failure above is. A
+			// failing read is not an absent entry: it leaves this ref's age
+			// and attempt count unknown, so proceeding could spend a
+			// thirty-minute review, and a comment set, on a ref the budgets
+			// had already given up on. Holding the watermark alone is not
+			// enough -- that only guarantees the ref is offered again, not
+			// that this sweep declines to review it now.
+			note(err)
+			note(p.hold(ref, "pending read failed", opts))
+			return dec(ActionDefer, "pending read failed")
+		}
 		if expired {
 			return dec(ActionSkip, "pending expired")
 		}
@@ -654,8 +674,23 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 				// `status`.
 				rec.ExitCode = ExitUnknown
 			}
-			rec.Detail = "review did not finish (" + rerr.Error() + "); comments may be partially posted, " +
-				"so it will not be retried automatically"
+			// The live warning is load-bearing: claude posts comments one at a
+			// time, so a run killed part-way through really may have left some
+			// on a colleague's pull request, and that is why this is never
+			// retried automatically.
+			//
+			// It is also impossible in a dry run, which withholds --comment
+			// and so has nothing to post with. Saying it anyway sent the
+			// operator looking for damage that cannot exist, and contradicted
+			// review.ReportError's own detail ("nothing was posted, so it is
+			// safe to replay") for two failures of the same dry run.
+			if p.Cfg.DryRun {
+				rec.Detail = "review did not finish (" + rerr.Error() + "); this was a dry run, so " +
+					"nothing was posted and it is safe to replay, but it will not be retried automatically"
+			} else {
+				rec.Detail = "review did not finish (" + rerr.Error() + "); comments may be partially posted, " +
+					"so it will not be retried automatically"
+			}
 		}
 
 		if err := p.Store.PutReview(rec); err != nil {
