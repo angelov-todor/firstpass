@@ -112,32 +112,46 @@ func New(r runner.Runner, claude string, extraArgs []string, dryRun bool, report
 // what to look at.
 func (rr *Runner) Prompt(ref prref.PRRef) string {
 	p := "/code-review " + ref.URL()
-	if !rr.dryRun {
-		p += " --comment"
+	if rr.dryRun {
+		return p
 	}
-	return p + verdictInstruction
+	return p + " --comment"
 }
 
-// verdictInstruction asks for the one line ParseVerdict reads.
+// verdictInstruction asks for the one line ParseVerdict reads. It travels as
+// --append-system-prompt, never inside the -p prompt.
 //
-// It is appended in both modes, byte for byte, so a dry-run report's "the
-// verdict would have been" is a genuine preview: the reviewer was asked
-// exactly the question a live run asks. The dry-run and live prompts still
-// differ by exactly --comment.
+// That distinction is load-bearing. Everything after "/code-review" in the -p
+// value becomes the slash command's $ARGUMENTS, so an instruction appended
+// there would be handed to a skill that parses its arguments for an effort
+// level, a --comment flag and a target: at best ignored, leaving no verdict
+// line at all, and at worst perturbing the target parsing -- and firstpass
+// would not find out until it silently failed in production. As a system
+// prompt the instruction reaches the reviewing agent directly and the prompt
+// stays byte-identical to the form that has actually been exercised against
+// real claude.
 //
-// The severity rule is stated here because firstpass cannot apply it itself:
-// it never sees a finding, only this line.
-const verdictInstruction = "\n\n" +
-	"When the review is finished, print exactly one of these two lines, verbatim, " +
-	"as the very last thing you print:\n" +
+// It is passed identically in both modes, so a dry-run report's "the verdict
+// would have been" is a genuine preview: the reviewer was asked exactly the
+// question a live run asks. The dry-run and live prompts still differ by
+// exactly --comment.
+//
+// It has to stand on its own, with no command adjacent to lean on, and it
+// states the severity rule because firstpass cannot apply it: firstpass never
+// sees a finding, only this line.
+const verdictInstruction = "You are running as firstpass: an automated first pass over a pull " +
+	"request, before any human has looked at it.\n\n" +
+	"When your review is complete, print exactly one of these two lines, verbatim, as the very " +
+	"last line of your output:\n" +
 	VerdictMarker + " approve\n" +
-	VerdictMarker + " findings\n" +
-	"Print `findings` if the review raised anything Critical or Important. " +
-	"Print `approve` if it raised nothing at all, or only minor nits. " +
-	"Print nothing after that line, and no other line starting with " +
-	VerdictMarker + ". firstpass reads this line to decide whether to approve the pull " +
-	"request or to leave it in the team's human review queue; if the line is missing " +
-	"or reworded, firstpass submits no verdict at all."
+	VerdictMarker + " findings\n\n" +
+	"Print `findings` if the review raised anything Critical or Important. Print `approve` if " +
+	"the review raised nothing at all, or only minor nits. Print nothing after that line, and " +
+	"no other line starting with " + VerdictMarker + "\n\n" +
+	"firstpass reads that line to decide whether to submit an approving review on the pull " +
+	"request or to leave it in the team's human review queue. It is the only thing firstpass " +
+	"can see about what you found: if the line is missing or reworded, firstpass submits no " +
+	"verdict at all."
 
 // ReportError reports that the review itself finished but its dry-run report
 // could not be written.
@@ -161,7 +175,12 @@ func (e *ReportError) Unwrap() error { return e.Err }
 // so discarding the captured output on the failure path left nothing to read
 // at the worst possible moment. The report names the failure itself.
 func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef) (Result, error) {
-	args := append([]string{"-p", rr.Prompt(ref)}, rr.extraArgs...)
+	// extraArgs stays last: it is operator-controlled config, so it must keep
+	// being able to override anything firstpass sets for itself.
+	args := append([]string{
+		"-p", rr.Prompt(ref),
+		"--append-system-prompt", verdictInstruction,
+	}, rr.extraArgs...)
 
 	res, err := rr.r.Run(ctx, dir, rr.claude, args...)
 	out := Result{

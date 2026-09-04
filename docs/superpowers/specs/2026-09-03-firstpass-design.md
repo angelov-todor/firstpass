@@ -98,11 +98,15 @@ interface with a fake, so `pipeline` tests run without subprocesses.
 6. `worktree.Prepare` maintains a bare mirror at
    `%LOCALAPPDATA%\firstpass\repos\<owner>_<repo>.git`, fetches `refs/pull/<n>/head`, and adds a
    worktree at `%LOCALAPPDATA%\firstpass\work\<owner>_<repo>_<n>`.
-7. `review.Run` executes `claude -p "/code-review --comment"` with cwd set to the worktree. The
-   prompt also asks the reviewer to finish by printing one machine-readable line,
-   `FIRSTPASS-VERDICT: approve` or `FIRSTPASS-VERDICT: findings`, which `review` parses out of
-   stdout. firstpass never sees a finding — `/code-review` posts them itself — so this line is the
-   only channel between what the reviewer concluded and what firstpass can act on.
+7. `review.Run` executes `claude -p "/code-review --comment"` with cwd set to the worktree, plus
+   `--append-system-prompt` carrying an instruction to finish by printing one machine-readable
+   line, `FIRSTPASS-VERDICT: approve` or `FIRSTPASS-VERDICT: findings`, which `review` parses out
+   of stdout. firstpass never sees a finding — `/code-review` posts them itself — so this line is
+   the only channel between what the reviewer concluded and what firstpass can act on. The
+   instruction is a system prompt, not part of the `-p` value: everything after `/code-review`
+   there becomes the slash command's `$ARGUMENTS`, which parses an effort level, a `--comment`
+   flag and a target, so prose appended to it would at best be dropped and at worst perturb the
+   target.
 8. After a review that succeeded, `ghpr.SubmitReview` submits that verdict as a GitHub review:
    `gh pr review <n> --repo <owner>/<repo> --approve` for `approve`, `--comment` for `findings`. A
    dry run submits nothing and says in its report what the verdict would have been. A failed,

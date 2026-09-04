@@ -18,8 +18,11 @@ One sweep, on a ticker or on demand:
    drafts, and anything already reviewed.
 4. For each survivor, prepare a throwaway git worktree against a local bare
    mirror of the repository.
-5. Run `claude -p "/code-review <pr-url>"` in that worktree, asking the
-   reviewer to finish by printing one machine-readable verdict line.
+5. Run `claude -p "/code-review <pr-url>"` in that worktree, with a
+   `--append-system-prompt` asking the reviewer to finish by printing one
+   machine-readable verdict line. The verdict instruction travels as a system
+   prompt rather than inside the `-p` value, because everything after the
+   slash command there becomes the command's own arguments.
 6. In dry run (the default), the findings are written to a report file. Live,
    `/code-review` posts them as inline comments on the PR.
 7. Submit that verdict as a GitHub review, so a reviewed PR is never silent —

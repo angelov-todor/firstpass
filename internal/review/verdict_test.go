@@ -120,22 +120,75 @@ func TestRunReturnsTheParsedVerdict(t *testing.T) {
 	}
 }
 
-// The prompt is the only place the verdict protocol is stated, and it must be
-// stated identically in both modes: the dry-run report's would-be verdict is
-// only a preview if the reviewer was asked the same question.
-func TestPromptAsksForTheVerdictLineInBothModes(t *testing.T) {
+// The instruction has to stand on its own: it reaches the reviewer as a
+// system prompt, with no command next to it to lean on. It must name both
+// accepted lines, say the last line printed is the verdict, and state the
+// severity rule -- firstpass cannot apply that rule itself, because it never
+// sees a finding.
+func TestVerdictInstructionStatesTheProtocolAndTheSeverityRule(t *testing.T) {
+	for _, want := range []string{
+		"FIRSTPASS-VERDICT: approve",
+		"FIRSTPASS-VERDICT: findings",
+		"last line of your output",
+		"Critical or Important",
+		"nits",
+	} {
+		if !strings.Contains(verdictInstruction, want) {
+			t.Errorf("the verdict instruction is missing %q:\n%s", want, verdictInstruction)
+		}
+	}
+}
+
+// The regression this fix exists to prevent, pinned explicitly rather than
+// left implied by the argv equality above.
+//
+// Everything after "/code-review" in the -p value becomes the slash command's
+// $ARGUMENTS. An instruction appended there is handed to a skill that parses
+// its arguments for an effort level, a --comment flag and a target: at best
+// it is ignored and no verdict line ever comes back, at worst it perturbs the
+// target parsing -- and either way firstpass would not find out until it
+// silently failed in production. The instruction travels as
+// --append-system-prompt instead, and the prompt stays byte-identical to the
+// form that has been exercised against real claude.
+func TestThePromptCarriesNoVerdictInstruction(t *testing.T) {
 	for _, dry := range []bool{true, false} {
 		got := New(&runner.Fake{}, "claude", nil, dry, t.TempDir()).Prompt(ref)
-		for _, want := range []string{
-			"FIRSTPASS-VERDICT: approve",
-			"FIRSTPASS-VERDICT: findings",
-			"Critical or Important",
-			"nits",
-		} {
-			if !strings.Contains(got, want) {
-				t.Errorf("dryRun=%v prompt missing %q:\n%s", dry, want, got)
+		if strings.Contains(got, VerdictMarker) {
+			t.Errorf("dryRun=%v: the verdict protocol must not ride in the -p prompt: %q", dry, got)
+		}
+		if strings.Contains(got, "\n") {
+			t.Errorf("dryRun=%v: the prompt must stay the single slash-command line: %q", dry, got)
+		}
+	}
+}
+
+// And the instruction must still reach claude, in both modes, byte for byte:
+// the dry-run report's "the verdict would have been" is only a preview if the
+// reviewer was asked exactly the question a live run asks.
+func TestBothModesPassTheSameVerdictInstructionToClaude(t *testing.T) {
+	arg := func(dry bool) string {
+		t.Helper()
+		f := &runner.Fake{Replies: []runner.Reply{
+			{Match: "code-review", Result: runner.Result{Stdout: []byte("x")}},
+		}}
+		if _, err := New(f, "claude", nil, dry, t.TempDir()).Run(context.Background(), "work", ref); err != nil {
+			t.Fatal(err)
+		}
+		args := f.Calls[0].Args
+		for i, a := range args {
+			if a == "--append-system-prompt" && i+1 < len(args) {
+				return args[i+1]
 			}
 		}
+		t.Fatalf("dryRun=%v: no --append-system-prompt in %q", dry, args)
+		return ""
+	}
+	dry, live := arg(true), arg(false)
+	if dry != verdictInstruction {
+		t.Errorf("dry run passed %q, want the verdict instruction", dry)
+	}
+	if dry != live {
+		t.Errorf("the instruction must be identical in both modes:\ndry  = %q\nlive = %q", dry, live)
 	}
 }
 
