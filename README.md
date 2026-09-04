@@ -64,8 +64,9 @@ the fields it marks as required: `space`, `github_login`, `allow_owners`, and
 install is healthy — it will tell you which of these is still missing.
 
 Run `firstpass doctor` to check every external dependency (`git`, `claude`,
-`gh` auth, the chat script, and that the configured Google Chat account can
-actually see named spaces).
+`gh` auth, whether the `gh` token actually carries the `repo` scope
+`gh pr review` needs to submit a verdict, the chat script, and that the
+configured Google Chat account can actually see named spaces).
 
 ## Commands
 
