@@ -75,6 +75,32 @@ type Review struct {
 	// verdict must look exactly like the reviewed rows already in the
 	// database from before verdicts existed.
 	Verdict Verdict `json:"verdict,omitempty"`
+
+	// Pass counts the reviews firstpass has run on this pull request: 1 for a
+	// first pass, 2 for the second pass a re-post with new commits triggers,
+	// and so on. Read it through PassNumber, never directly: the production
+	// database is full of reviewed rows written before this field existed,
+	// and every one of them was a first pass.
+	//
+	// omitempty for the same reason as Verdict: a pass of 0 is a state no
+	// code ever means, so keeping it off disk makes a pre-existing row and a
+	// freshly written first pass the same shape to read.
+	Pass int `json:"pass,omitempty"`
+	// PreviousHeadSHA is the commit the pass before this one reviewed, so a
+	// second pass does not lose the commit whose comments are already on the
+	// pull request. Empty on a first pass.
+	PreviousHeadSHA string `json:"previous_head_sha,omitempty"`
+}
+
+// PassNumber is how many reviews firstpass has run on this pull request,
+// counting this one. It exists so an absent Pass -- every reviewed row written
+// before the field did -- reads as the first pass it was, rather than as a
+// pass 0 that has never existed.
+func (r Review) PassNumber() int {
+	if r.Pass < 1 {
+		return 1
+	}
+	return r.Pass
 }
 
 // Pending is a pull request deferred to a later sweep.
