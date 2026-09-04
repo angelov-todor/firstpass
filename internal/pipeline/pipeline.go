@@ -696,7 +696,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// A replay is exempt: the operator named this PR, so a stale backlog entry
 	// must not retire it out from under them.
 	if !opts.replay {
-		expired, err := p.expirePending(ref, opts)
+		expired, err := p.expirePending(ref, previous, opts)
 		if err != nil {
 			// Deferred, exactly as the Store.Review read failure above is. A
 			// failing read is not an absent entry: it leaves this ref's age
@@ -751,7 +751,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 			review.ShortSHA(previous.HeadSHA))
 	}
 	if info.State != "OPEN" {
-		note(p.terminal(ref, store.OutcomeSkippedState, c.trigger, "state "+info.State, opts))
+		note(p.terminalSkip(ref, previous, store.OutcomeSkippedState, c.trigger, "state "+info.State, opts))
 		return dec(ActionSkip, "state "+info.State)
 	}
 	if info.IsDraft {
@@ -761,7 +761,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		return dec(ActionDefer, "draft")
 	}
 	if strings.EqualFold(info.Author, p.Cfg.GithubLogin) {
-		note(p.terminal(ref, store.OutcomeSkippedAuthor, c.trigger, "authored by "+info.Author, opts))
+		note(p.terminalSkip(ref, previous, store.OutcomeSkippedAuthor, c.trigger, "authored by "+info.Author, opts))
 		return dec(ActionSkip, "own PR")
 	}
 
@@ -1070,6 +1070,52 @@ func (p *Pipeline) terminal(ref prref.PRRef, o store.Outcome, trigger, detail st
 // keeps accruing age: a ref parked by the per-sweep cap, or by a store
 // failure, must still expire eventually, or age-based expiry never fires for a
 // backlog that is permanently over the cap.
+// terminalSkip records a terminal skip -- unless this candidate carries the
+// record of a pass that has already reviewed this pull request, in which case
+// that record is left exactly as it is and only the pending entry is cleared.
+//
+// Skipping is still right at every gate that calls this: a merged pull
+// request, or one now attributed to you, must not be reviewed. What is not
+// right is overwriting the record while doing it. That record is the only
+// evidence of what firstpass did here -- the commit it reviewed, the verdict
+// it submitted under the operator's own GitHub identity, and which pass that
+// was -- and none of it is recoverable from anywhere else. A skip would
+// replace all of it with a description of GitHub's current state.
+//
+// Not rewriting, rather than rewriting while preserving those fields, because
+// the question the record answers is "what did firstpass do about this pull
+// request", and it already answers it correctly. Somebody merging the pull
+// request afterwards, or `github_login` changing under it, is not a firstpass
+// decision at all, and a record that said `skipped_state` with a reviewed
+// SHA and a submitted verdict hanging off it would be a state no other code
+// path can produce and no reader would know how to interpret.
+//
+// This applies only below the record gate. The owner allowlist and the deny
+// list sit *above* it and still record their refusal unconditionally: those
+// are firstpass's own decisions, they are the safety rails rather than a
+// report of somebody else's action, and a candidate re-posted from a
+// disallowed owner never reaches the record read at all.
+//
+// The pending entry is still deleted. That is housekeeping rather than
+// history: left behind, it is re-offered on every sweep until it expires.
+func (p *Pipeline) terminalSkip(ref prref.PRRef, previous *store.Review, o store.Outcome,
+	trigger, detail string, opts Options) error {
+
+	if previous == nil {
+		return p.terminal(ref, o, trigger, detail, opts)
+	}
+	if opts.PrintOnly {
+		return nil
+	}
+	p.Log.Info("skipped, keeping the earlier pass's record", "key", ref.Key(),
+		"would_have_been", string(o), "detail", detail, "kept", string(previous.Outcome))
+	if err := p.Store.DeletePending(ref.Key()); err != nil {
+		p.Log.Error("delete pending", "key", ref.Key(), "err", err)
+		return err
+	}
+	return nil
+}
+
 func (p *Pipeline) hold(ref prref.PRRef, reason string, opts Options) error {
 	return p.upsertPending(ref, reason, false, false, opts)
 }
@@ -1159,7 +1205,7 @@ func (p *Pipeline) upsertPending(ref prref.PRRef, reason string, countAttempt, p
 // reads and evaluates the pending entry in print-only mode -- the caller
 // needs the true decision -- but terminal() (called with the same opts) is
 // what suppresses the write.
-func (p *Pipeline) expirePending(ref prref.PRRef, opts Options) (bool, error) {
+func (p *Pipeline) expirePending(ref prref.PRRef, previous *store.Review, opts Options) (bool, error) {
 	pd, ok, err := p.Store.Pending(ref.Key())
 	if err != nil {
 		// A failing read is not an absent entry. Collapsed into one condition,
@@ -1185,5 +1231,5 @@ func (p *Pipeline) expirePending(ref prref.PRRef, opts Options) (bool, error) {
 		reason = "expired after " + age.Round(time.Hour).String() + " pending"
 	}
 	p.Log.Warn("pending expired", "key", pd.Key, "reason", reason, "last", pd.LastReason)
-	return true, p.terminal(ref, store.OutcomeExpired, "", reason, opts)
+	return true, p.terminalSkip(ref, previous, store.OutcomeExpired, "", reason, opts)
 }
