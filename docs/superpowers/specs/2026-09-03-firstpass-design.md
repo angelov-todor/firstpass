@@ -17,7 +17,8 @@ PR, runs a Claude Code review and posts the findings as inline GitHub PR comment
 In scope:
 
 - Poll the `[AstraEx] Team` space for newly posted GitHub PR links.
-- Review each qualifying PR once, in an isolated checkout.
+- Review each qualifying PR once per commit, in an isolated checkout: a re-posted PR is reviewed
+  again if, and only if, it has new commits since the pass that already reviewed it.
 - Post findings as inline comments on the PR, under the user's own GitHub identity.
 - Submit an explicit review verdict on every successfully reviewed PR, so a clean one is never
   silent: an approval when nothing needs changing, a comment review when something does.
@@ -27,8 +28,16 @@ In scope:
 Out of scope:
 
 - Any chat platform other than Google Chat; any forge other than GitHub.
-- Re-reviewing on subsequent pushes. The team re-posts a PR whose approval lapsed, so the re-post
-  is the re-trigger.
+- Re-reviewing on a push alone. The re-post is the re-trigger: firstpass watches the space, not
+  the repository, so new commits on their own are invisible to it and always will be. A re-post
+  with new commits does earn a second pass (see the dedupe row below); a push with no re-post
+  earns nothing.
+- Incremental review. A second pass reviews the whole pull request again and posts a fresh set of
+  inline comments. Diffing against the previously-reviewed commit is not possible: the mirror
+  force-updates `refs/firstpass/N`, so that commit can be unreachable by the time the next pass
+  runs. The reviewer is told a pass already happened and asked to concentrate on what has changed
+  and not to restate that pass's findings, which is a request in a system prompt rather than a
+  guarantee.
 - Replying to review threads or resolving them. Requesting changes is out of scope too, and
   deliberately so: see the verdict asymmetry above. Approving is in scope, but only for a PR the
   reviewer raised nothing about.
@@ -43,7 +52,7 @@ Out of scope:
 | Review engine | `claude -p "/code-review --comment"` | Reuses the repo's `CLAUDE.md`, the `dotnet-techne-code-review` skill, the sonarqube MCP, and `/code-review`'s existing inline-comment posting. Go builds no prompt and touches no GitHub comment API. |
 | Checkout | Bare mirror cache plus a throwaway worktree per PR | Never touches the user's working copies in `example-org/`, so a background review cannot disturb an active branch or uncommitted work. |
 | Scope | Every posted PR except ones the user authored | Matches how the space is used. `github_login: angelov-todor`. |
-| Dedupe | Once per PR identity | The team re-posts when an approval lapses, so re-posting is the intended re-trigger. |
+| Dedupe | Once per commit, on a re-post | The team re-posts when an approval lapses or when they have pushed fixes, so re-posting is the intended re-trigger — but a re-post of the same commit must not earn a second comment set on lines that already carry one. Three conditions, all required: the record's outcome is `reviewed` **and** names the commit it reviewed; the re-post is a different, non-empty chat message; and the live head SHA differs from the recorded one. `needs_attention` is deliberately excluded — it means a review died mid-post, so comments may be half posted and an automatic retry risks duplicating them; a re-post is not consent to that, `firstpass replay` is. Every skipped outcome is excluded because nothing was ever reviewed, and a reviewed row with no head SHA is excluded because condition 3 cannot be established from a missing field. |
 | Output | Inline GitHub PR comments | The user's explicit choice, made against a recommendation of local-only. Mitigated by a dry-run default, not by narrowing the choice. |
 | Verdict | An explicit GitHub review on every successfully reviewed PR, decided by the reviewer in one `FIRSTPASS-VERDICT:` line and submitted by firstpass | `/code-review --comment` posts findings and nothing else, so a clean PR produced complete silence — indistinguishable from the tool never having run. It happened for real on a +9/−0 one-file PR. The reviewer decides because firstpass never sees a finding; firstpass submits because that makes the action recorded in the store, visible in `status`, and testable against `runner.Fake` rather than buried in a prompt. |
 | Verdict asymmetry | `approve` for nothing-needing-change; a **COMMENT** review, never request-changes, for anything Critical or Important | An approval clears `reviewDecision`, which takes the PR out of the team's human review queue — acceptable only when there is nothing to change. A comment leaves `reviewDecision` at `REVIEW_REQUIRED`, so a PR with findings stays in the queue and a human still looks. request-changes was rejected outright: it would block a merge and speak for a human who has not read the code yet. |
@@ -96,9 +105,20 @@ interface with a fake, so `pipeline` tests run without subprocesses.
    to oldest and stops at the stored watermark.
 3. `prref.Extract` runs per message; refs are de-duplicated within the batch.
 4. Refs are filtered against `allow_owners` and `deny_repos`, then against `store` for an existing
-   terminal record. The owner check comes first, so a disallowed owner is never even queried.
+   terminal record. The owner check comes first, so a disallowed owner is never even queried. A
+   `reviewed` record re-posted by a different chat message is the one case that falls through this
+   gate rather than skipping at it, carrying the previous record with it: the third dedupe
+   condition needs the live head SHA, which only step 5 can supply. Every other outcome still skips
+   here, above every GitHub call, and no gate moved to make room for it.
 5. `ghpr.Inspect` runs `gh pr view --json state,isDraft,author,headRefOid`. A PR qualifies only if
-   it is `OPEN`, not a draft, and not authored by `github_login`.
+   it is `OPEN`, not a draft, and not authored by `github_login`. A re-posted PR whose head SHA
+   matches the recorded one is skipped immediately below this call, above the state gate: its
+   record's trigger message is moved to the new post, so the same re-post is not re-inspected on
+   every sweep while it sits in the fetch window, and nothing else about the record changes. Being
+   above the state gate is deliberate — a PR re-posted after it was merged then keeps its
+   `reviewed` record and the verdict on it, rather than having them overwritten with
+   `skipped_state`. The cost of the whole feature is this one `gh pr view` per re-post that turns
+   out to have nothing new in it.
 6. `worktree.Prepare` maintains a bare mirror at
    `%LOCALAPPDATA%\firstpass\repos\<owner>_<repo>.git`, fetches `refs/pull/<n>/head`, and adds a
    worktree at `%LOCALAPPDATA%\firstpass\work\<owner>_<repo>_<n>`.
@@ -106,8 +126,12 @@ interface with a fake, so `pipeline` tests run without subprocesses.
    `--append-system-prompt` carrying an instruction to finish by printing one machine-readable
    line, `FIRSTPASS-VERDICT: approve` or `FIRSTPASS-VERDICT: findings`, which `review` parses out
    of stdout. firstpass never sees a finding — `/code-review` posts them itself — so this line is
-   the only channel between what the reviewer concluded and what firstpass can act on. The
-   instruction is a system prompt, not part of the `-p` value: everything after `/code-review`
+   the only channel between what the reviewer concluded and what firstpass can act on. On a second
+   pass the system prompt also carries a note that a previous automated pass reviewed this pull
+   request at a named commit and posted its findings as inline comments, asking the reviewer to
+   concentrate on what has changed and not to restate that pass's findings — without it a second
+   pass repeats every unfixed finding on the same lines. The `-p` value is byte-identical across
+   passes. The instruction is a system prompt, not part of the `-p` value: everything after `/code-review`
    there becomes the slash command's `$ARGUMENTS`, which parses an effort level, a `--comment`
    flag and a target, so prose appended to it would at best be dropped and at worst perturb the
    target.
@@ -126,8 +150,13 @@ interface with a fake, so `pipeline` tests run without subprocesses.
 - `meta` — `watermark` -> `{messageName, createTime}`. The key is the message **name**
   (`spaces/.../messages/...`), which is stable and unique. `createTime` has ties and clock skew, so
   it serves only as a coarse pagination bound.
-- `reviews` — `owner/repo#n` -> outcome, submitted verdict, head SHA, triggering message, duration, exit code, report
-  path.
+- `reviews` — `owner/repo#n` -> outcome, submitted verdict, head SHA, triggering message, duration,
+  exit code, report path, pass number and previous head SHA. The last two are what a second pass
+  adds: the pass number so `status` can tell a first pass from a later one, and the previous head
+  SHA so the commit whose comments are already on the pull request is not lost when the head SHA is
+  overwritten. Both were added after the tool was in production, so a pre-existing row carries
+  neither: it decodes as pass 0 on the wire and is read through `Review.PassNumber`, which reports
+  the first pass it was. "Pass 0" is a state no code ever means.
 - `pending` — `owner/repo#n` -> `{firstSeen, attempts, lastAttempt, lastReason}`.
 - `messages` — `spaces/.../messages/...` -> `{name, refKeys, firstSeen, watchApplied, watchReaction,
   resultApplied, resultReaction}`. Never pruned, deliberately: there is no delete method at all.
@@ -154,7 +183,7 @@ set.
 
 | Class | Outcomes | Behaviour |
 |---|---|---|
-| Terminal | reviewed, author-is-user, merged, closed, owner not allowed, repo denylisted | Stored in `reviews`. Never revisited. |
+| Terminal | reviewed, author-is-user, merged, closed, owner not allowed, repo denylisted | Stored in `reviews`. Never revisited, with one exception: a `reviewed` record is superseded by a second pass when the PR is re-posted by a different message and has new commits. |
 | Deferred | draft, `gh` / network failure, `worktree` failure — all of which occur before `claude` starts | Stored in `pending`. Re-inspected every sweep, independent of the watermark. Retried with backoff. |
 | Needs attention | review timeout, `claude` crash, any failure after `claude` started | Stored in `reviews` as `needs_attention`. No automatic retry, ever. |
 
@@ -244,8 +273,9 @@ finish last.
 ## Safety controls
 
 1. **`dry_run: true` in the shipped config.** Runs `/code-review` without `--comment` and writes
-   findings to `%LOCALAPPDATA%\firstpass\reports\<owner>_<repo>_<n>.md`. Same pipeline, same worktree,
-   same reviewer, no GitHub write.
+   findings to `%LOCALAPPDATA%\firstpass\reports\<owner>_<repo>_<n>.md` — and a later pass to
+   `<owner>_<repo>_<n>_after_<short-sha>.md`, so it does not overwrite the report the previous pass
+   left behind. Same pipeline, same worktree, same reviewer, no GitHub write.
 2. **Cold-start guard.** A first run with an empty watermark reviews nothing: it sets the watermark
    to the newest message and stops. `scan --backfill N` deliberately takes the last N messages.
 3. **Kill switch.** A `PAUSE` file in the state dir, written and removed by `pause` / `resume`.
@@ -322,7 +352,10 @@ Test-driven throughout. The decision logic is I/O-free, so most tests need no su
   draft to `pending`, merged terminal, owner not in `allow_owners`, in-batch dedupe, per-sweep cap,
   `PAUSE` file (including that it does not increment `attempts`), cold start reviewing nothing,
   timeout landing on `needs_attention` rather than retrying, and the watermark advancing only after
-  a fully recorded batch.
+  a fully recorded batch. Each of the three second-pass conditions is pinned in both directions,
+  including the two that must be decided without a GitHub call at all — those assert on the absence
+  of the `Inspect` call, not on the outcome, because an outcome-only assertion would pass just as
+  happily with the gate moved below GitHub.
 - **`store`** — real bbolt in a temp dir, reopened mid-test to prove `in_flight` and the watermark
   survive a restart, and a fixture database built with only the original three buckets to prove a
   pre-existing database gains `messages` and keeps its records.
@@ -351,7 +384,9 @@ Slices 1 to 3 hold most of the logic and cannot write anywhere.
   are all finished: ✅ only if every PR on it that firstpass reviewed was approved. A post whose
   PRs were all skipped carries neither reaction.
 - The user's own PRs, drafts, and merged or closed PRs receive no comments.
-- No PR receives duplicate comment sets, including across daemon restarts and crashes.
+- No PR receives two comment sets for the same commit, including across daemon restarts and
+  crashes. A PR re-posted with new commits does receive a second, fresh set — that is the second
+  pass, and it is deliberate.
 - A first run against a populated space reviews nothing.
 - `pause` stops all posting within one sweep.
 - The user's working copies in `example-org/` are never modified.

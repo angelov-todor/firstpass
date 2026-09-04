@@ -15,7 +15,8 @@ One sweep, on a ticker or on demand:
 2. Extract GitHub pull request links from the message text (full URLs and
    `owner/repo#n` shorthand).
 3. Filter: skip PRs you authored, PRs whose owner isn't on `allow_owners`,
-   drafts, and anything already reviewed.
+   drafts, and anything already reviewed **at the commit it is now at** — see
+   [Second pass](#second-pass).
 4. For each survivor, prepare a throwaway git worktree against a local bare
    mirror of the repository.
 5. Run `claude -p "/code-review <pr-url>"` in that worktree, with a
@@ -37,6 +38,52 @@ One sweep, on a ticker or on demand:
    verdict would have been.
 8. Live, the chat message that carried the link gets a reaction, so the team
    can see the PR has been picked up and, later, how it came out.
+
+## Second pass
+
+The dedupe rule is **once per commit, on a re-post** — not once per pull
+request. A PR posted to the space again is reviewed again, but only if it has
+new commits since the pass that already reviewed it.
+
+**A second pass posts a fresh set of inline comments.** It is a whole review,
+not an increment: the reviewer is told a previous pass ran and asked to
+concentrate on what has changed and not to restate that pass's findings, but
+nothing enforces it. Expect new comments on the pull request, and a new
+verdict submitted alongside them.
+
+All three of these must hold, or the re-post is skipped:
+
+1. The existing record's outcome is `reviewed`, and it records the commit it
+   reviewed. **No other outcome qualifies.** `needs_attention` in particular
+   still needs an explicit `firstpass replay`: it means a review died
+   mid-post, so comments may be half posted, and an automatic retry risks
+   putting a second copy of each of them on a colleague's pull request. A
+   re-post is not consent to that. Every skipped outcome fails for the plainer
+   reason that nothing was ever reviewed.
+2. The re-post is a **different chat message** from the one that triggered the
+   recorded review. The same message can still be sitting in the fifty-message
+   fetch window on the next sweep — a `-backfill`, or a watermark gap, will
+   offer it again — and a PR re-offered from the backlog names no message at
+   all. Neither is a re-post.
+3. The **live head SHA differs** from the recorded one. This is the invariant:
+   no pull request is ever reviewed twice for the same commit, because the
+   first pass's comments are already on those exact lines.
+
+Re-posted with no new commits, the record's trigger message is updated to the
+new post and nothing else about it changes, so the same re-post is not
+re-inspected on every sweep for as long as it sits in the window. That costs
+one `gh pr view` per re-post that turns out to have nothing new in it, which
+is the only new external call this feature makes.
+
+`firstpass status` marks a later pass — `reviewed / findings (pass 2)`. A row
+written before this feature existed has no pass number and reads as the first
+pass it was. A dry run's report for a later pass is written to
+`<owner>_<repo>_<n>_after_<short-sha>.md`, so it does not overwrite the report
+the previous pass left behind: reading both is how you see what the new
+commits changed.
+
+`firstpass replay` is unaffected. It ignores the record entirely, which is the
+whole point of it, so none of the three conditions applies.
 
 ## Chat reactions
 
@@ -99,7 +146,7 @@ The chat script needs two more subcommands for this, `add-reaction
 and are logged, and reviews carry on exactly as before.
 
 Decisions and outcomes are recorded in a local `bbolt` database, so restarts
-and crashes never cause a PR to be reviewed twice. Which PRs each chat message
+and crashes never cause a PR to be reviewed twice for the same commit. Which PRs each chat message
 carried is recorded there too, because the result reaction can be hours behind
 the post that triggered it.
 
@@ -161,6 +208,12 @@ Read this before running anything other than `doctor` or `scan -print-only`.
   to real chat messages, under your Google identity. `dry_run` is an absolute
   "no outward effect" switch: a dry run does not react, does not submit
   a verdict, and does not even record the state a reaction would need.
+- **A re-post reviews the PR again, and posts a second set of inline
+  comments.** Only when it has new commits since the last pass — see
+  [Second pass](#second-pass) — but when it does, the author gets a fresh
+  review on their pull request and a fresh verdict submitted under your
+  identity. The reviewer is asked not to restate the previous pass's findings;
+  that is a request in a system prompt, not a guarantee.
 - **A clean PR is approved under your own GitHub identity.** Live, a
   successful review always ends in a submitted GitHub review: an approval when
   the reviewer raised nothing or only nits, a comment review when it raised
