@@ -161,15 +161,26 @@ func (p *Pipeline) startMessageReaction(ctx context.Context, trigger string, opt
 // outcome. It does nothing until then, and nothing at all if none of them was
 // ever reviewed.
 //
-// ✅ versus 💬 is decided by the recorded outcomes: ✅ only when every one of
-// the message's refs came out store.OutcomeReviewed, 💬 otherwise. On this
-// branch that is the strongest signal available -- a review's findings live in
-// claude's free-text output or on the pull request itself, and neither is
-// something the pipeline can read. It therefore means "every one of these was
-// reviewed without incident" rather than "no findings", and 💬 means "at least
-// one of these wants a human's eye", which covers a review that did not finish
-// as much as one that produced comments. Once the review-verdict work lands,
-// this is the one place to re-point at the verdict.
+// ✅ versus 💬 is decided by the verdict firstpass submitted on each pull
+// request, which is the only signal that actually distinguishes "clean" from
+// "has findings": the findings themselves are inline comments on the pull
+// request, and the pipeline never sees one. ✅ means every pull request this
+// message carried *that firstpass reviewed* was approved. Anything else is 💬.
+//
+// Two asymmetries are deliberate.
+//
+// Refs firstpass never reviewed -- skipped for their owner, the deny list,
+// their state, their author, or retired by pending expiry -- are left out of
+// the decision entirely. A skip is not a finding: nothing was wrong with the
+// code, firstpass simply had no business reviewing it, so a message carrying
+// one approved review and one merged link is clean.
+//
+// Everything short of an outright approval is 💬. store.VerdictApproved is
+// only ever set when a submission actually succeeded, so a findings verdict, a
+// reviewer that printed no verdict line, a submission that failed, and a
+// review that did not finish at all are all "firstpass does not know that this
+// is clean" -- and not knowing must never be rendered as ✅. A misleading tick
+// on a pull request with twenty comments waiting is worse than no reaction.
 func (p *Pipeline) settleMessageReaction(ctx context.Context, trigger string, opts Options) {
 	if !p.reactionsEnabled(opts) || trigger == "" {
 		return
@@ -196,7 +207,7 @@ func (p *Pipeline) settleMessageReaction(ctx context.Context, trigger string, op
 		return
 	}
 
-	clean := true
+	reviewed, clean := 0, true
 	for _, key := range rec.RefKeys {
 		r, found, err := p.Store.Review(key)
 		if err != nil {
@@ -206,12 +217,39 @@ func (p *Pipeline) settleMessageReaction(ctx context.Context, trigger string, op
 		if !found || !r.Outcome.Terminal() {
 			// Still being worked through. in_flight is the only non-terminal
 			// outcome, so this is either a review running right now or one of
-			// the message's refs parked in pending.
+			// the message's refs parked in pending. Every ref has to be
+			// finished before the message is: that is what makes one result
+			// reaction per message possible at all.
 			return
 		}
-		if r.Outcome != store.OutcomeReviewed {
+		switch r.Outcome {
+		case store.OutcomeSkippedAuthor, store.OutcomeSkippedState,
+			store.OutcomeSkippedOwner, store.OutcomeSkippedRepo, store.OutcomeExpired:
+			// Never reviewed, so it says nothing about the code either way.
+		case store.OutcomeReviewed:
+			reviewed++
+			if r.Verdict != store.VerdictApproved {
+				clean = false
+			}
+		default:
+			// needs_attention today, and whatever is added later. A review
+			// that may have posted half a comment set is not a clean bill of
+			// health, and an outcome this switch does not recognise must never
+			// be given the optimistic reading -- the cost of being wrong here
+			// is a ✅ nobody earned.
+			reviewed++
 			clean = false
 		}
+	}
+	if reviewed == 0 {
+		// Nothing in this message's current ref list was ever reviewed, so
+		// there is no result to report -- the same reasoning as the
+		// WatchApplied guard above, and the loop's own vacuous "clean" is
+		// exactly why it has to be said separately. The two can disagree: the
+		// ref list is re-read from the message text every sweep, and a chat
+		// message that is edited after its review started ends up with a 👀 on
+		// it and a ref list holding nothing firstpass reviewed.
+		return
 	}
 
 	emoji := EmojiFindings

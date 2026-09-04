@@ -71,15 +71,21 @@ func (f *fakeReactor) RemoveReaction(ctx context.Context, reactionName string) e
 }
 
 // orderedRev is the harness's reviewer with its invocations interleaved into
-// the reactor's log.
+// the reactor's log, and with a per-ref verdict override so one message can
+// carry a clean pull request and a findings one at once.
 type orderedRev struct {
-	inner *fakeRev
-	log   *[]string
+	inner    *fakeRev
+	log      *[]string
+	verdicts map[string]review.Verdict
 }
 
 func (o *orderedRev) Run(ctx context.Context, dir string, ref prref.PRRef) (review.Result, error) {
 	*o.log = append(*o.log, "review:"+ref.Key())
-	return o.inner.Run(ctx, dir, ref)
+	res, err := o.inner.Run(ctx, dir, ref)
+	if v, ok := o.verdicts[ref.Key()]; ok {
+		res.Verdict = v
+	}
+	return res, err
 }
 
 // ---- harness ----
@@ -94,12 +100,30 @@ func reactHarness(t *testing.T, msgs []chat.Message) (*harness, *fakeReactor) {
 	h.apply()
 	h.seedWatermark(t)
 
+	// ✅ now means "every pull request firstpass reviewed came back approved",
+	// so the harness's default review has to be a clean one. Left at the zero
+	// verdict, every review would record store.VerdictUnknown and every
+	// message would earn 💬 -- which would make most of the tests below pass
+	// or fail for reasons that have nothing to do with what they are checking.
+	h.rev.result = review.Result{Verdict: review.VerdictApprove}
+
 	log := &[]string{}
 	rc := &fakeReactor{log: log}
 	h.p.React = rc
-	h.p.Rev = &orderedRev{inner: h.rev, log: log}
+	h.p.Rev = &orderedRev{inner: h.rev, log: log, verdicts: map[string]review.Verdict{}}
 	h.reactLog = log
 	return h, rc
+}
+
+// revOf reaches the reviewer reactHarness wired, so a test can give one ref a
+// different verdict from another.
+func revOf(t *testing.T, h *harness) *orderedRev {
+	t.Helper()
+	r, ok := h.p.Rev.(*orderedRev)
+	if !ok {
+		t.Fatalf("Rev = %T, want *orderedRev", h.p.Rev)
+	}
+	return r
 }
 
 // reactionCalls is the interleaved log with the reviewer's own entries
@@ -242,14 +266,111 @@ func TestResultReactionWaitsForEveryRefTheMessageCarried(t *testing.T) {
 
 // ---- ✅ versus 💬 ----
 
-func TestResultIsCleanOnlyWhenEveryReviewCameOutReviewed(t *testing.T) {
-	h, rc := reactHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-a", 1))})
+func TestResultIsCleanOnlyWhenEveryReviewedRefWasApproved(t *testing.T) {
+	h, rc := reactHarness(t, []chat.Message{
+		msg("spaces/A/messages/m1", prURL("aex-a", 1)+"\n"+prURL("aex-b", 2)),
+	})
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Reviewed != 2 {
+		t.Fatalf("Reviewed = %d, want 2: %+v", rep.Reviewed, rep.Decisions)
+	}
+	// Both verdicts were submitted, which is what makes the ✅ below mean
+	// "approved" rather than merely "the review process completed".
+	for _, key := range []string{"example-org/aex-a#1", "example-org/aex-b#2"} {
+		r, ok, err := h.st.Review(key)
+		if err != nil || !ok {
+			t.Fatalf("%s: ok=%v err=%v", key, ok, err)
+		}
+		if r.Verdict != store.VerdictApproved {
+			t.Fatalf("%s: Verdict = %q, want approved", key, r.Verdict)
+		}
+	}
+	if got := emojis(rc); len(got) != 2 || got[1] != EmojiClean {
+		t.Errorf("emojis = %v, want [👀 ✅] when every reviewed PR was approved", got)
+	}
+}
+
+func TestAFindingsVerdictOnOneRefMakesTheWholeMessageFindings(t *testing.T) {
+	h, rc := reactHarness(t, []chat.Message{
+		msg("spaces/A/messages/m1", prURL("aex-a", 1)+"\n"+prURL("aex-b", 2)),
+	})
+	// aex-a#1 is approved; aex-b#2 raised something Critical or Important. Both
+	// are store.OutcomeReviewed, so nothing but the verdict tells them apart --
+	// which is exactly the case the old outcome-only rule got wrong, calling a
+	// PR with twenty inline comments clean.
+	revOf(t, h).verdicts["example-org/aex-b#2"] = review.VerdictFindings
 
 	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := emojis(rc); len(got) != 2 || got[1] != EmojiClean {
-		t.Errorf("emojis = %v, want [👀 ✅] for a message whose only review succeeded", got)
+	for key, want := range map[string]store.Verdict{
+		"example-org/aex-a#1": store.VerdictApproved,
+		"example-org/aex-b#2": store.VerdictFindings,
+	} {
+		r, ok, err := h.st.Review(key)
+		if err != nil || !ok {
+			t.Fatalf("%s: ok=%v err=%v", key, ok, err)
+		}
+		if r.Outcome != store.OutcomeReviewed {
+			t.Fatalf("%s: Outcome = %q, want reviewed -- both refs must be reviewed, or the "+
+				"verdict is not what decided this", key, r.Outcome)
+		}
+		if r.Verdict != want {
+			t.Fatalf("%s: Verdict = %q, want %q", key, r.Verdict, want)
+		}
+	}
+	if got := emojis(rc); len(got) != 2 || got[1] != EmojiFindings {
+		t.Errorf("emojis = %v, want [👀 💬]: one of the message's PRs has findings on it", got)
+	}
+}
+
+func TestAnUnknownVerdictIsNotGoodEnoughForATick(t *testing.T) {
+	h, rc := reactHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-a", 1))})
+	// The reviewer printed no verdict line firstpass recognises, so firstpass
+	// does not know whether this pull request is clean.
+	revOf(t, h).verdicts["example-org/aex-a#1"] = review.VerdictUnknown
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Reviewed != 1 {
+		t.Fatalf("Reviewed = %d, want 1: the review itself succeeded (%+v)", rep.Reviewed, rep.Decisions)
+	}
+	r, _, _ := h.st.Review("example-org/aex-a#1")
+	if r.Outcome != store.OutcomeReviewed || r.Verdict != store.VerdictUnknown {
+		t.Fatalf("record = %q / %q, want reviewed / unknown", r.Outcome, r.Verdict)
+	}
+	if got := emojis(rc); len(got) != 2 || got[1] != EmojiFindings {
+		t.Errorf("emojis = %v, want [👀 💬]: not knowing must never be read as ✅", got)
+	}
+}
+
+func TestAVerdictThatCouldNotBeSubmittedIsNotClean(t *testing.T) {
+	h, rc := reactHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-a", 1))})
+	// The reviewer said approve, but gh refused the submission, so nothing was
+	// approved on the pull request and the record's verdict is left unset. The
+	// team must not be told ✅ about an approval that never happened.
+	h.prs.submitErr = errors.New("gh: HTTP 403")
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Reviewed != 1 {
+		t.Fatalf("Reviewed = %d, want 1: a failed submission leaves the review reviewed (%+v)",
+			rep.Reviewed, rep.Decisions)
+	}
+	r, _, _ := h.st.Review("example-org/aex-a#1")
+	if r.Outcome != store.OutcomeReviewed || r.Verdict != store.VerdictNone {
+		t.Fatalf("record = %q / %q, want reviewed with the verdict left unset", r.Outcome, r.Verdict)
+	}
+	if got := emojis(rc); len(got) != 2 || got[1] != EmojiFindings {
+		t.Errorf("emojis = %v, want [👀 💬]: an approval that failed to submit is not an approval", got)
 	}
 }
 
@@ -273,19 +394,107 @@ func TestResultIsFindingsWhenAReviewNeedsAttention(t *testing.T) {
 	}
 }
 
-func TestOneNonCleanRefIsEnoughForFindings(t *testing.T) {
+func TestASkippedRefDoesNotSpoilAnOtherwiseCleanMessage(t *testing.T) {
 	h, rc := reactHarness(t, []chat.Message{
 		msg("spaces/A/messages/m1", prURL("aex-a", 1)+"\n"+prURL("aex-b", 2)),
 	})
-	// aex-a#1 reviews cleanly; aex-b#2 is closed, so it is recorded terminal
-	// without ever being reviewed. The message as a whole is not clean.
+	// aex-a#1 is reviewed and approved; aex-b#2 is closed, so it is recorded
+	// terminal without ever being reviewed. A skip is not a finding: nothing
+	// was wrong with it, firstpass simply had no business reviewing it, and it
+	// says nothing at all about the code. It must not drag the message to 💬.
 	h.prs.info["example-org/aex-b#2"] = ghpr.PRInfo{State: "CLOSED", Author: "colleague"}
 
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := decisionFor(rep, "example-org/aex-b#2"); d.Action != ActionSkip {
+		t.Fatalf("aex-b#2 must have been skipped, got %q", d.Action)
+	}
+	if b, _, _ := h.st.Review("example-org/aex-b#2"); b.Outcome != store.OutcomeSkippedState {
+		t.Fatalf("aex-b#2 Outcome = %q, want skipped_state", b.Outcome)
+	}
+	if got := emojis(rc); len(got) != 2 || got[1] != EmojiClean {
+		t.Errorf("emojis = %v, want [👀 ✅]: the one PR firstpass actually reviewed was approved", got)
+	}
+}
+
+func TestAnExpiredRefDoesNotSpoilAnOtherwiseCleanMessage(t *testing.T) {
+	h, rc := reactHarness(t, []chat.Message{
+		msg("spaces/A/messages/m1", prURL("aex-a", 1)+"\n"+prURL("aex-b", 2)),
+	})
+	// aex-b#2 has been a draft for so long that its pending entry aged out.
+	// Expiry is firstpass giving up on ever reviewing it, not a finding.
+	h.prs.info["example-org/aex-b#2"] = ghpr.PRInfo{State: "OPEN", Author: "colleague", IsDraft: true}
+	h.cfg.PendingMaxAttempts = 1
+	h.apply()
+	if err := h.st.PutPending(store.Pending{
+		Key: "example-org/aex-b#2", FirstSeen: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), Attempts: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := decisionFor(rep, "example-org/aex-b#2"); d.Reason != "pending expired" {
+		t.Fatalf("aex-b#2 must have expired, got %q / %q", d.Action, d.Reason)
+	}
+	if b, _, _ := h.st.Review("example-org/aex-b#2"); b.Outcome != store.OutcomeExpired {
+		t.Fatalf("aex-b#2 Outcome = %q, want expired", b.Outcome)
+	}
+	if got := emojis(rc); len(got) != 2 || got[1] != EmojiClean {
+		t.Errorf("emojis = %v, want [👀 ✅]: an expired PR was never reviewed, so it is not a finding", got)
+	}
+}
+
+// The refs a message carries are re-read from its text every sweep, and chat
+// messages can be edited. A message can therefore end up with a 👀 on it -- a
+// review really did start -- and a ref list in which nothing was reviewed at
+// all. Without the "no reviewed refs" guard the ref loop is vacuous, clean
+// stays true, and the message earns a bare ✅ for work firstpass never did.
+func TestAMessageLeftWithNoReviewedRefsGetsNoResultReaction(t *testing.T) {
+	h, rc := reactHarness(t, []chat.Message{
+		msg("spaces/A/messages/m1", prURL("aex-a", 1)+"\n"+prURL("aex-b", 2)),
+	})
+	h.prs.info["example-org/aex-b#2"] = ghpr.PRInfo{State: "OPEN", Author: "colleague", IsDraft: true}
+
+	// aex-a#1 is reviewed, so the 👀 goes on; aex-b#2 is a draft, so the
+	// message is not finished and gets no result reaction yet.
 	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := emojis(rc); len(got) != 2 || got[1] != EmojiFindings {
-		t.Errorf("emojis = %v, want [👀 💬]: one PR of the two never got a clean review", got)
+	if got := emojis(rc); len(got) != 1 || got[0] != EmojiWatching {
+		t.Fatalf("emojis = %v, want just the watching one", got)
+	}
+
+	// The message is edited to point at a third, closed pull request instead.
+	// Its ref list is refreshed to one that holds nothing firstpass reviewed.
+	h.prs.info["example-org/aex-c#3"] = ghpr.PRInfo{State: "CLOSED", Author: "colleague"}
+	h.ch.msgs = []chat.Message{msg("spaces/A/messages/m1", prURL("aex-c", 3))}
+	h.seedWatermark(t)
+	if _, err := h.p.Sweep(context.Background(), Options{Backfill: 10}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, ok, err := h.st.Message("spaces/A/messages/m1")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if len(rec.RefKeys) != 1 || rec.RefKeys[0] != "example-org/aex-c#3" {
+		t.Fatalf("RefKeys = %v, want just the edited-in ref: without that the test proves nothing",
+			rec.RefKeys)
+	}
+	if !rec.WatchApplied {
+		t.Fatal("the message must still carry its watching reaction")
+	}
+	if got := emojis(rc); len(got) != 1 || got[0] != EmojiWatching {
+		t.Errorf("emojis = %v, want no result reaction: nothing in this message's ref list was "+
+			"ever reviewed, so there is nothing to report", got)
+	}
+	if rec.ResultApplied {
+		t.Errorf("no result reaction may have been marked: %+v", rec)
 	}
 }
 
@@ -430,6 +639,7 @@ func TestNoReactionsWhileFirstpassIsPaused(t *testing.T) {
 	// Writing the record straight into the store is that dead process.
 	if err := h.st.PutReview(store.Review{
 		Key: "example-org/aex-b#2", Outcome: store.OutcomeReviewed,
+		Verdict:   store.VerdictApproved,
 		DecidedAt: time.Date(2026, 9, 3, 11, 30, 0, 0, time.UTC),
 	}); err != nil {
 		t.Fatal(err)

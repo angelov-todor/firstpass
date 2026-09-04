@@ -177,21 +177,39 @@ fire when something is genuinely stuck.
 Live only. 👀 goes on immediately before the first `Rev.Run` for a PR that message carried — the
 first moment "this is being reviewed" is true, and the last moment it is still useful to say. Once
 every PR that message carried has a terminal review record, the result reaction goes on and the 👀
-comes off: ✅ if every one of them came out `reviewed`, 💬 otherwise.
+comes off.
 
-**On this branch ✅ means "all reviewed without incident", not "no findings."** A review's findings
-live in `claude`'s free-text output or on the pull request itself, and the pipeline can read
-neither, so `store.Outcome` is the strongest signal available: 💬 therefore covers a review that
-did not finish (`needs_attention`) and a PR that was skipped rather than reviewed, as well as one
-that genuinely had things to say. `settleMessageReaction` is the single place to re-point at the
-review verdict once that work lands.
+**The result is decided by the verdict, not by the outcome.** ✅ means every PR this message
+carried **that firstpass reviewed** was recorded `store.VerdictApproved` — the verdict that
+submitted an approving GitHub review. Everything else is 💬. The verdict is the only signal that
+distinguishes clean from not: the findings are inline comments on the pull request and the pipeline
+never sees one, so an outcome-based rule would call a PR with twenty comments on it clean, purely
+because the review process completed.
+
+Two asymmetries are deliberate:
+
+- **PRs firstpass never reviewed are left out of the decision.** Skipped for the owner, the deny
+  list, the state, the author, or retired by pending expiry: a skip is not a finding — nothing was
+  wrong with the code, firstpass simply had no business reviewing it. A message carrying one
+  approved review and one merged link is clean, and gets ✅.
+- **Everything short of an outright approval is 💬.** `store.VerdictApproved` is only ever set when
+  a submission actually succeeded, so a findings verdict, a reviewer that printed no verdict line,
+  a submission that failed, and a review that did not finish at all are all "firstpass does not
+  know that this is clean" — and not knowing is never rendered as ✅. A misleading tick on a PR
+  with comments waiting is worse than no reaction, so an unrecognised outcome takes the pessimistic
+  reading too.
 
 The rules, all of them tested:
 
 1. **Nothing that was not reviewed is reacted to.** `watchApplied` is the "a review actually
    started" flag, and no `watchApplied` means no result reaction either — so a message whose every
    link was skipped for its owner, the deny list, its state, its author, being a draft, the
-   per-sweep cap, a pause or print-only gets no reaction at all.
+   per-sweep cap, a pause or print-only gets no reaction at all. `settleMessageReaction` says it
+   again independently: if, after excluding the skips, no ref was reviewed, it reacts to nothing.
+   The two can disagree, because the ref list is re-read from the message text every sweep and a
+   chat message edited after its review started ends up carrying a 👀 and a ref list holding
+   nothing firstpass reviewed. Without the second check the ref loop is vacuous and the message
+   earns a bare ✅ for work firstpass never did.
 2. **Never twice for the same stage.** Each stage is recorded in the store *before* the API call,
    the same discipline as writing a review record as `in_flight` before `claude` starts: an
    outward act that might be repeated is worse than one that is occasionally missed, and a reaction
@@ -231,7 +249,8 @@ finish last.
    otherwise allowed owner.
 7. **Reactions are cosmetic by construction.** One gate (`reactionsEnabled`) refuses in a dry run,
    in print-only mode, and when no reactor is wired; `cmd` additionally wires no reactor in a dry
-   run. Every reaction failure is logged and dropped.
+   run. Every reaction failure is logged and dropped — it cannot change an outcome, defer a PR, or
+   alter the verdict submitted on one.
 
 ## Configuration
 
@@ -315,7 +334,8 @@ Slices 1 to 3 hold most of the logic and cannot write anywhere.
 - A PR posted to `[AstraEx] Team` by another team member receives inline review comments within one
   poll interval, with no manual step.
 - That post carries 👀 while its PRs are being reviewed, and exactly one result reaction once they
-  are all finished. A post whose PRs were all skipped carries neither.
+  are all finished: ✅ only if every PR on it that firstpass reviewed was approved. A post whose
+  PRs were all skipped carries neither reaction.
 - The user's own PRs, drafts, and merged or closed PRs receive no comments.
 - No PR receives duplicate comment sets, including across daemon restarts and crashes.
 - A first run against a populated space reviews nothing.
