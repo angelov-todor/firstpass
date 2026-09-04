@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -34,14 +35,18 @@ const (
 	doctorCheckTimeout = 30 * time.Second
 	// doctorOverallTimeout keeps the command itself bounded, and must leave
 	// real headroom over the sum of the checks. Four sequential checks at
-	// doctorCheckTimeout are already 4 x 30s = 2m, so a 2m overall budget gave
-	// none: the last check to run -- "google chat reachable", the one
+	// doctorCheckTimeout were already 4 x 30s = 2m, so a 2m overall budget
+	// gave none: the last check to run -- "google chat reachable", the one
 	// fatalChatBanner explicitly sends the operator to -- lost exactly the
 	// pre-check time and would fail on the context rather than on its merits,
 	// reaching a zero deadline in the limit.
 	// That is the exact misattribution the per-check deadline exists to
 	// prevent, so the overall budget has to exceed the sum, not equal it.
-	doctorOverallTimeout = 3 * time.Minute
+	//
+	// Raised from 3m to 4m when the fifth bounded check ("gh can submit
+	// reviews") was added: five at 30s is 2m30s, and 3m would have cut the
+	// headroom from a minute to thirty seconds.
+	doctorOverallTimeout = 4 * time.Minute
 )
 
 // withCheckTimeout runs one doctor check under its own deadline, derived from
@@ -96,6 +101,24 @@ func cmdDoctor(args []string) error {
 		add("gh authenticated", bounded(func(ctx context.Context) error {
 			return ghAuth(ctx, r, cfg.Paths.GH)
 		}), cfg.Paths.GH)
+
+		// Authenticated is not the same as allowed to write. `gh pr review`
+		// is the first writing gh command firstpass runs, and a token that
+		// can read pull requests but not review them fails once per PR --
+		// which the operator only discovers after a twelve-minute review has
+		// already run.
+		//
+		// The detail is read after the check has run, not inside the add()
+		// call: Go does not order a plain variable read against a function
+		// call in the same argument list, so passing scopeDetail alongside
+		// the call could read it before it was assigned.
+		var scopeDetail string
+		serr := bounded(func(ctx context.Context) error {
+			var err error
+			scopeDetail, err = ghReviewScope(ctx, r, cfg.Paths.GH)
+			return err
+		})
+		add("gh can submit reviews", serr, scopeDetail)
 
 		ch := chat.New(r, cfg.Paths.Python, cfg.Paths.ChatScript, cfg.Space)
 		var named bool
@@ -180,6 +203,69 @@ func version(ctx context.Context, r runner.Runner, bin string, args ...string) e
 		return fmt.Errorf("%s exit %d", bin, res.ExitCode)
 	}
 	return nil
+}
+
+// ghReviewScope is a read-only preflight for the one writing gh command
+// firstpass runs, `gh pr review`. It returns the detail to show on a pass.
+//
+// `gh api --include user` is a GET: it reads the authenticated user and, for
+// a classic token, comes back with an `x-oauth-scopes` response header naming
+// the token's scopes. `repo` (or `public_repo` for public repositories only)
+// is what submitting a review needs.
+//
+// The honest limit, and the reason this does not simply pass or fail: a
+// fine-grained personal access token or a GitHub App token sends no such
+// header, and its permissions cannot be read from a response at all. In that
+// case this passes with a detail saying write access could not be determined,
+// rather than claiming it is fine. A check that reports a confident PASS it
+// has not established would be worse than no check.
+func ghReviewScope(ctx context.Context, r runner.Runner, gh string) (string, error) {
+	res, err := r.Run(ctx, "", gh, "api", "--include", "user")
+	if err != nil {
+		return "", err
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("gh api user exit %d: %s",
+			res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+	}
+
+	scopes, ok := oauthScopes(res.Stdout)
+	if !ok || len(scopes) == 0 {
+		return "write access could not be determined: this token sent no x-oauth-scopes header, " +
+			"which is normal for a fine-grained or GitHub App token. If it turns out to lack " +
+			"write access, each verdict is recorded as a failed submission in `firstpass status` " +
+			"and never retried", nil
+	}
+	for _, s := range scopes {
+		if s == "repo" || s == "public_repo" {
+			return "x-oauth-scopes: " + strings.Join(scopes, ", "), nil
+		}
+	}
+	return "", fmt.Errorf("the gh token has scopes [%s] but neither `repo` nor `public_repo`, so "+
+		"`gh pr review` cannot submit a review verdict: run "+
+		"`gh auth refresh -h github.com -s repo`. Dry runs are unaffected — they submit no "+
+		"verdict — but every live verdict would fail", strings.Join(scopes, ", "))
+}
+
+// oauthScopes reads the x-oauth-scopes response header out of the output of
+// `gh api --include`, which prints the status line and headers ahead of the
+// body. The second result reports whether the header was present at all,
+// which is not the same as it being empty.
+func oauthScopes(out []byte) ([]string, bool) {
+	for _, line := range strings.Split(string(out), "\n") {
+		name, value, found := strings.Cut(line, ":")
+		if !found || !strings.EqualFold(strings.TrimSpace(name), "x-oauth-scopes") {
+			continue
+		}
+		var scopes []string
+		for _, s := range strings.Split(value, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				scopes = append(scopes, s)
+			}
+		}
+		return scopes, true
+	}
+	return nil, false
 }
 
 func ghAuth(ctx context.Context, r runner.Runner, gh string) error {

@@ -30,8 +30,15 @@ type (
 		// foundSince means messages were missed; see Sweep.
 		Fetch(ctx context.Context, sinceName string, limit int) (msgs []chat.Message, foundSince bool, err error)
 	}
-	PRInspector interface {
+	// PRClient is the gh seam: what firstpass asks GitHub about a pull
+	// request, plus the one thing it writes back.
+	PRClient interface {
 		Inspect(ctx context.Context, ref prref.PRRef) (ghpr.PRInfo, error)
+		// SubmitReview submits the verdict of a finished review. It is on
+		// this interface rather than left to the prompt so the action is
+		// firstpass's: recorded in the store, visible in status, and
+		// exercised by these tests without a subprocess.
+		SubmitReview(ctx context.Context, ref prref.PRRef, verdict, body string) error
 	}
 	Worktrees interface {
 		Prepare(ctx context.Context, ref prref.PRRef) (dir string, cleanup func(), err error)
@@ -60,6 +67,47 @@ const inFlightReason = "previous run died mid-review"
 // exit status at all -- killed by its deadline, or never started. A persisted
 // zero would read as a clean success in `firstpass status`.
 const ExitUnknown = -1
+
+// firstpassURL goes in every verdict body, so a colleague who finds one of
+// these reviews on their pull request can see what produced it.
+const firstpassURL = "https://github.com/angelov-todor/firstpass"
+
+// The two verdict bodies. They open by saying they are machine-written
+// because they are submitted under the operator's own GitHub identity, and a
+// colleague reading one has no other way to tell.
+const (
+	verdictBodyApprove = "Automated first pass by firstpass — no findings. " +
+		"This is machine-written, not a human review.\n\n" +
+		"firstpass ran a Claude Code review over this pull request and raised nothing " +
+		"needing a change.\n\n" + firstpassURL
+
+	// "posted as inline comments on this pull request", not "on this review":
+	// /code-review posts each inline comment as its own review event, so the
+	// comments do not hang off this review at all. Saying they did would be
+	// false to any colleague who went looking for them here.
+	verdictBodyFindings = "Automated first pass by firstpass — findings posted inline. " +
+		"This is machine-written and is not a substitute for human review.\n\n" +
+		"The findings are posted as inline comments on this pull request. This is deliberately " +
+		"a comment rather than a request for changes, so the pull request stays in the team's " +
+		"human review queue.\n\n" + firstpassURL
+)
+
+// noVerdictDetail is recorded when a review finished but printed no verdict
+// line firstpass recognises. Nothing is submitted and nothing is guessed: an
+// approval nobody chose is the one outcome this feature exists to prevent.
+//
+// It is dry-run aware for the same reason the killed-review detail is (see
+// handle): a dry run withholds --comment and therefore cannot have posted
+// anything, and a detail that says otherwise sends the operator looking for
+// damage that cannot exist. `firstpass status` shows this string verbatim.
+func noVerdictDetail(dryRun bool) string {
+	const tail = "printed no " + review.VerdictMarker + " line firstpass recognises, so no " +
+		"verdict was submitted and none was guessed"
+	if dryRun {
+		return "the review finished, and this was a dry run so nothing was posted; it " + tail
+	}
+	return "the review finished and its comments are posted, but it " + tail
+}
 
 // inFlightDetail is the human-facing note stored on a recovered record.
 func inFlightDetail(ref prref.PRRef) string {
@@ -150,7 +198,7 @@ type Pipeline struct {
 	Cfg   config.Config
 	Store *store.Store
 	Chat  ChatSource
-	PRs   PRInspector
+	PRs   PRClient
 	WTs   Worktrees
 	Rev   Reviewer
 	Log   *slog.Logger
@@ -710,6 +758,11 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	}
 
 	rec.Outcome = store.OutcomeReviewed
+	// Only now, after a review that succeeded. A failed, killed or timed-out
+	// review returned above and submitted nothing: it may have posted a
+	// partial comment set, and a verdict on top of that would state a
+	// conclusion the review never reached.
+	p.submitVerdict(ctx, &rec, ref, res.Verdict)
 	if err := p.Store.PutReview(rec); err != nil {
 		p.Log.Error("put review", "key", ref.Key(), "err", err)
 		note(err)
@@ -725,6 +778,70 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		Detail: reviewFinishedDetail(string(rec.Outcome), done.Sub(started)),
 	})
 	return dec(ActionReview, "reviewed")
+}
+
+// submitVerdict submits the verdict of a review that has just succeeded, and
+// records on rec what was actually submitted. It never changes rec.Outcome:
+// by the time it runs the review is done and its comments are posted, so
+// nothing that happens here can turn it into needs_attention -- that outcome
+// means "comments may be partially posted, do not retry", which is not what a
+// missing or refused verdict is.
+//
+// The four cases, and why each is what it is:
+//
+//   - approve or findings, live: submitted, and recorded as submitted.
+//   - approve or findings, dry run: nothing is submitted, the verdict is left
+//     unset, and the detail says what it would have been. A dry run posting a
+//     review would defeat the whole point of the dry-run default.
+//   - unknown: nothing is submitted, the verdict is recorded as unknown, and
+//     the detail says the line was missing. Guessing here would approve a
+//     colleague's pull request on the strength of silence.
+//   - a submission that failed: the verdict is left unset and the error goes
+//     in the detail, where `firstpass status` shows it. Not retried
+//     automatically, and deliberately not an error the caller sees: the review
+//     succeeded.
+func (p *Pipeline) submitVerdict(ctx context.Context, rec *store.Review, ref prref.PRRef, v review.Verdict) {
+	var event, body string
+	var submitted store.Verdict
+	switch v {
+	case review.VerdictApprove:
+		event, body, submitted = ghpr.ReviewApprove, verdictBodyApprove, store.VerdictApproved
+	case review.VerdictFindings:
+		event, body, submitted = ghpr.ReviewComment, verdictBodyFindings, store.VerdictFindings
+	default:
+		p.Log.Warn("no verdict", "key", ref.Key(), "verdict", string(v))
+		// Recorded as unknown in both modes, unlike the dry-run branch below
+		// which leaves the verdict unset. The two mean different things and
+		// the distinction is what the operator is watching during the dry-run
+		// phase: unknown says the reviewer produced no verdict at all, so
+		// there was never anything to submit and a live run would have
+		// submitted nothing either; unset says there was a verdict and
+		// firstpass did not submit it (a dry run, or a submission that
+		// failed). Neither is ever a positive value, which is the invariant
+		// that matters: store.Verdict only ever holds approved or findings
+		// when a submission actually succeeded.
+		rec.Verdict = store.VerdictUnknown
+		rec.Detail = noVerdictDetail(p.Cfg.DryRun)
+		return
+	}
+
+	if p.Cfg.DryRun {
+		rec.Detail = "dry run: the verdict would have been " + string(v) +
+			", and nothing was submitted"
+		return
+	}
+
+	sctx, cancel := context.WithTimeout(ctx, p.Cfg.GHTimeout.D())
+	defer cancel()
+	if err := p.PRs.SubmitReview(sctx, ref, event, body); err != nil {
+		p.Log.Error("submit verdict", "key", ref.Key(), "verdict", string(v), "err", err)
+		rec.Detail = "the review finished and its comments are posted, but submitting the " +
+			string(v) + " verdict failed (" + err.Error() + "); the review itself is complete, " +
+			"so nothing is retried automatically"
+		return
+	}
+	p.Log.Info("verdict submitted", "key", ref.Key(), "verdict", string(submitted))
+	rec.Verdict = submitted
 }
 
 // ReviewOne reviews a single pull request on demand, clearing any record that

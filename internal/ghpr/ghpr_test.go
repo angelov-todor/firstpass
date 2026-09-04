@@ -49,9 +49,22 @@ func TestInspectParsesDraft(t *testing.T) {
 	}
 }
 
+// Per the runner contract a non-zero exit arrives as data, not an error, so
+// Inspect has to check it explicitly.
+//
+// The stdout here decodes cleanly on purpose. With empty stdout this test
+// passed even with the exit check removed, because json.Unmarshal("") fails
+// and produces an error of its own -- so it asserted that *some* error came
+// back rather than the contract it is named for. A decodable body leaves the
+// exit code as the only thing that can produce one.
 func TestInspectReportsNonZeroExit(t *testing.T) {
+	body := `{"state":"OPEN","isDraft":false,"author":{"login":"stefan-cvetkovic"},"headRefOid":"deadbeef"}`
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "pr view", Result: runner.Result{ExitCode: 1, Stderr: []byte("could not resolve to a PullRequest")}},
+		{Match: "pr view", Result: runner.Result{
+			ExitCode: 1,
+			Stdout:   []byte(body),
+			Stderr:   []byte("could not resolve to a PullRequest"),
+		}},
 	}}
 
 	_, err := New(f, "gh").Inspect(context.Background(), ref)

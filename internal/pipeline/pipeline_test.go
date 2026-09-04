@@ -47,6 +47,19 @@ func (f *fakeChat) Fetch(_ context.Context, since string, limit int) ([]chat.Mes
 type fakePRs struct {
 	info map[string]ghpr.PRInfo
 	err  map[string]error
+
+	// submitted records every verdict submission attempted through this fake,
+	// so a test that does not care about the argv can still prove nothing was
+	// submitted. Tests that do care wire the real ghpr client over a
+	// runner.Fake instead; see verdict_test.go.
+	submitted []submittedVerdict
+	submitErr error
+}
+
+type submittedVerdict struct {
+	key     string
+	verdict string
+	body    string
 }
 
 func (f *fakePRs) Inspect(_ context.Context, ref prref.PRRef) (ghpr.PRInfo, error) {
@@ -57,6 +70,11 @@ func (f *fakePRs) Inspect(_ context.Context, ref prref.PRRef) (ghpr.PRInfo, erro
 		return i, nil
 	}
 	return ghpr.PRInfo{State: "OPEN", Author: "colleague", HeadSHA: "sha-" + ref.Repo}, nil
+}
+
+func (f *fakePRs) SubmitReview(_ context.Context, ref prref.PRRef, verdict, body string) error {
+	f.submitted = append(f.submitted, submittedVerdict{key: ref.Key(), verdict: verdict, body: body})
+	return f.submitErr
 }
 
 type fakeWTs struct {

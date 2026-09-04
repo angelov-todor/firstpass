@@ -66,8 +66,14 @@ func TestRunInvokesClaudeInTheWorktreeWithConfiguredArgs(t *testing.T) {
 	}
 	// Asserted in order, not by substring presence: "-p" must be immediately
 	// followed by the whole prompt, or claude reads the PR URL as a second
-	// positional argument and the prompt loses its target.
-	want := []string{"-p", "/code-review " + ref.URL(), "--permission-mode", "bypassPermissions"}
+	// positional argument and the prompt loses its target -- and the same for
+	// --append-system-prompt and the verdict instruction. extraArgs stays
+	// last, so operator config can still override anything firstpass sets.
+	want := []string{
+		"-p", "/code-review " + ref.URL(),
+		"--append-system-prompt", verdictInstruction,
+		"--permission-mode", "bypassPermissions",
+	}
 	if !slices.Equal(c.Args, want) {
 		t.Errorf("Args = %q, want %q", c.Args, want)
 	}
@@ -85,7 +91,11 @@ func TestRunPassesTheLivePromptInOrder(t *testing.T) {
 	if len(f.Calls) != 1 {
 		t.Fatalf("Calls = %+v", f.Calls)
 	}
-	want := []string{"-p", "/code-review " + ref.URL() + " --comment", "--permission-mode", "bypassPermissions"}
+	want := []string{
+		"-p", "/code-review " + ref.URL() + " --comment",
+		"--append-system-prompt", verdictInstruction,
+		"--permission-mode", "bypassPermissions",
+	}
 	if !slices.Equal(f.Calls[0].Args, want) {
 		t.Errorf("Args = %q, want %q", f.Calls[0].Args, want)
 	}

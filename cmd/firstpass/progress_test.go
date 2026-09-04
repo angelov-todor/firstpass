@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -221,6 +222,14 @@ func (quietTestPRs) Inspect(context.Context, prref.PRRef) (ghpr.PRInfo, error) {
 	return ghpr.PRInfo{State: "OPEN", Author: "colleague", HeadSHA: "sha"}, nil
 }
 
+// This test runs the default dry run, which submits no verdict, and
+// quietTestRev returns no verdict either. Reaching here means one of those
+// two facts has changed, so it fails rather than quietly writing to GitHub's
+// stand-in.
+func (quietTestPRs) SubmitReview(_ context.Context, ref prref.PRRef, verdict, _ string) error {
+	return fmt.Errorf("this test must submit no verdict, got %q for %s", verdict, ref.Key())
+}
+
 type quietTestWTs struct{}
 
 func (quietTestWTs) Prepare(context.Context, prref.PRRef) (string, func(), error) {
@@ -237,7 +246,7 @@ func (quietTestRev) Run(context.Context, string, prref.PRRef) (review.Result, er
 // shape of what cmdScan wires: -quiet must silence stderr progress output
 // entirely while leaving the stdout decision table exactly as it would be
 // without -quiet. Built on the same seams internal/pipeline's own tests use
-// (fakes behind the exported ChatSource/PRInspector/Worktrees/Reviewer
+// (fakes behind the exported ChatSource/PRClient/Worktrees/Reviewer
 // interfaces plus a real bbolt store in a temp dir), so this proves the
 // cmd-layer wiring without a real chat script, gh, or claude subprocess.
 func TestQuietSuppressesProgressButStillPrintsResultTable(t *testing.T) {

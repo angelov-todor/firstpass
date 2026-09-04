@@ -18,9 +18,23 @@ One sweep, on a ticker or on demand:
    drafts, and anything already reviewed.
 4. For each survivor, prepare a throwaway git worktree against a local bare
    mirror of the repository.
-5. Run `claude -p "/code-review <pr-url>"` in that worktree.
+5. Run `claude -p "/code-review <pr-url>"` in that worktree, with a
+   `--append-system-prompt` asking the reviewer to finish by printing one
+   machine-readable verdict line. The verdict instruction travels as a system
+   prompt rather than inside the `-p` value, because everything after the
+   slash command there becomes the command's own arguments.
 6. In dry run (the default), the findings are written to a report file. Live,
    `/code-review` posts them as inline comments on the PR.
+7. Submit that verdict as a GitHub review, so a reviewed PR is never silent —
+   a clean one used to produce nothing at all, indistinguishable from the tool
+   never having run. Nothing needing change (no findings, or only minor nits)
+   is an **approval**, posted under your own GitHub identity. Anything
+   Critical or Important is a **comment** review, deliberately not
+   request-changes: a comment leaves `reviewDecision` at `REVIEW_REQUIRED`, so
+   the PR stays in the team's human review queue, whereas an approval would
+   take it out. Every verdict body says in its first sentence that it is
+   machine-written. A dry run submits nothing and its report says what the
+   verdict would have been.
 
 Decisions and outcomes are recorded in a local `bbolt` database, so restarts
 and crashes never cause a PR to be reviewed twice.
@@ -50,8 +64,9 @@ the fields it marks as required: `space`, `github_login`, `allow_owners`, and
 install is healthy — it will tell you which of these is still missing.
 
 Run `firstpass doctor` to check every external dependency (`git`, `claude`,
-`gh` auth, the chat script, and that the configured Google Chat account can
-actually see named spaces).
+`gh` auth, whether the `gh` token actually carries the `repo` scope
+`gh pr review` needs to submit a verdict, the chat script, and that the
+configured Google Chat account can actually see named spaces).
 
 ## Commands
 
@@ -76,6 +91,19 @@ Read this before running anything other than `doctor` or `scan -print-only`.
 - **`dry_run: true` is the default.** Passing `-live`, or setting
   `dry_run: false` in the config, is what makes firstpass post real comments
   to real pull requests, under your GitHub identity.
+- **A clean PR is approved under your own GitHub identity.** Live, a
+  successful review always ends in a submitted GitHub review: an approval when
+  the reviewer raised nothing or only nits, a comment review when it raised
+  anything Critical or Important. Your colleagues see both as *you*, which is
+  why every body opens by saying it is machine-written and links this
+  repository. A findings verdict is never request-changes, so a machine never
+  blocks a merge on its own — but an approval does clear `reviewDecision`, and
+  that is a real approval on someone else's work. Nothing is submitted unless
+  the review itself succeeded and the reviewer printed a verdict line
+  firstpass recognises: a missing or unrecognised line submits nothing and is
+  recorded as `reviewed / verdict unknown`, never guessed into an approval. A
+  submission that fails leaves the review recorded as `reviewed` with the
+  error visible in `firstpass status`, and is not retried.
 - **`allow_owners` is the blast-radius control, and it has no default.** A
   Google Chat space is a chat room, not an access boundary — someone will
   eventually paste a link to a repository you don't intend firstpass to
@@ -91,11 +119,23 @@ Read this before running anything other than `doctor` or `scan -print-only`.
   prompt will read as instructions. See
   `docs/superpowers/reviews/2026-09-03-final-review-outcomes.md` for the
   full analysis and the mitigations that were considered but not applied.
-- **Posting has never been exercised.** Parsing and filtering were checked
-  against 200 messages of real chat history, and one dry-run `replay` has
-  been run end to end: it produced a substantive report in 12m15s, which is
-  why `review_timeout` defaults to 30m. What has *not* happened is a live
-  run — nothing has ever been posted to a pull request by this tool. Read
-  your own dry-run report (`scan -backfill N`, or `replay <url>`, without
-  `-live`) and satisfy yourself you would be happy for it to appear on a
-  colleague's PR before ever setting `dry_run: false`.
+- **Inline comments are exercised; the verdict is not.** Parsing and
+  filtering were checked against 200 messages of real chat history, and a
+  dry-run `replay` produced a substantive report in 12m15s, which is why
+  `review_timeout` defaults to 30m. Comments have since been posted live: on
+  a 7-file, +539/−12 pull request firstpass left three inline comments,
+  including one that falsified a security claim in the PR's own description,
+  one `IsSuccessStatusCode` trap where a 2xx with an undeserialisable body
+  silently skips an audit-trail write, and one null dereference whose broad
+  `catch` then logged the opposite of what had happened. That is the standard
+  to hold it to, and it is the reason to read your own dry-run report (`scan
+  -backfill N`, or `replay <url>`, without `-live`) before setting `dry_run:
+  false`.
+
+  What has **not** been exercised is the verdict. No review verdict has ever
+  been submitted by this tool: the code path is new, and no real `claude` run
+  has yet been observed printing the `FIRSTPASS-VERDICT:` line the reviewer is
+  asked for. Until you have seen a dry-run report say "the verdict would have
+  been" with a value you agree with — several times — treat the verdict as
+  unproven, and remember that the approve case posts a real approval under
+  your identity.

@@ -109,10 +109,12 @@ func TestDoctorCheckHonoursTheOverallDeadline(t *testing.T) {
 // 2m overall made 4 x 30s exactly the whole budget, so the last check to run
 // -- google chat reachable, the one fatalChatBanner sends the operator to --
 // lost its deadline to the pre-check work and failed on the context instead of
-// on its merits. A fifth check, or a raised per-check value, would silently
-// reintroduce that; this test makes it a red build instead.
+// on its merits. A further check, or a raised per-check value, would silently
+// reintroduce that; this test makes it a red build instead. The fifth check
+// ("gh can submit reviews") is why doctorOverallTimeout went from 3m to 4m --
+// the count here has to be kept in step with cmdDoctor.
 func TestDoctorOverallBudgetExceedsTheSumOfItsChecks(t *testing.T) {
-	const boundedChecks = 4 // git, claude, gh auth, google chat
+	const boundedChecks = 5 // git, claude, gh auth, gh review scope, google chat
 	if sum := boundedChecks * doctorCheckTimeout; doctorOverallTimeout <= sum {
 		t.Fatalf("doctorOverallTimeout = %s, but %d checks at %s each need %s: "+
 			"the last check would inherit a shortened deadline and misreport",

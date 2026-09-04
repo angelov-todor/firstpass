@@ -21,6 +21,66 @@ type Result struct {
 	ExitCode   int
 	ReportPath string
 	Stdout     []byte
+	// Verdict is what the reviewer concluded about severity, parsed out of
+	// stdout. It is VerdictUnknown unless the reviewer printed one of the two
+	// accepted lines: firstpass never infers a verdict from anything else.
+	Verdict Verdict
+}
+
+// Verdict is the reviewer's own answer to "does this pull request need a human
+// to change something?".
+//
+// firstpass is deliberately ignorant of the findings themselves —
+// /code-review posts them as inline comments and firstpass sees only the exit
+// code and stdout — so this one line is the whole channel between the two.
+// Deciding the verdict is the reviewer's job; submitting it is firstpass's.
+type Verdict string
+
+const (
+	// VerdictUnknown is the verdict of a review that printed no accepted
+	// verdict line. It is never resolved into one of the other two: firstpass
+	// submits nothing rather than guess, because the wrong guess is an
+	// approval on a colleague's pull request.
+	VerdictUnknown Verdict = "unknown"
+	// VerdictApprove means nothing needing change was raised: no findings, or
+	// only minor nits.
+	VerdictApprove Verdict = "approve"
+	// VerdictFindings means something Critical or Important was raised.
+	VerdictFindings Verdict = "findings"
+)
+
+// VerdictMarker prefixes the one machine-readable line the prompt asks for.
+const VerdictMarker = "FIRSTPASS-VERDICT:"
+
+// ParseVerdict reads the verdict out of a review's stdout.
+//
+// The last marked line wins, and it wins whatever it says. A headless agent
+// narrating its own plan can print the marker early ("I will finish with
+// FIRSTPASS-VERDICT: approve") and then print the real one after doing the
+// work, so an early match cannot be trusted — and an unrecognised last line
+// must not fall back to a recognised earlier one either, or this would be
+// picking whichever answer it liked best out of the transcript.
+//
+// The value is compared exactly, after trimming: "APPROVE", "approved" and
+// "approve (only nits)" are all unknown. Loose matching is what would turn a
+// reviewer that hedged into an approval nobody chose.
+func ParseVerdict(stdout []byte) Verdict {
+	v := VerdictUnknown
+	for _, line := range strings.Split(string(stdout), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), VerdictMarker)
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(rest) {
+		case string(VerdictApprove):
+			v = VerdictApprove
+		case string(VerdictFindings):
+			v = VerdictFindings
+		default:
+			v = VerdictUnknown
+		}
+	}
+	return v
 }
 
 // Runner drives the claude CLI.
@@ -58,6 +118,41 @@ func (rr *Runner) Prompt(ref prref.PRRef) string {
 	return p + " --comment"
 }
 
+// verdictInstruction asks for the one line ParseVerdict reads. It travels as
+// --append-system-prompt, never inside the -p prompt.
+//
+// That distinction is load-bearing. Everything after "/code-review" in the -p
+// value becomes the slash command's $ARGUMENTS, so an instruction appended
+// there would be handed to a skill that parses its arguments for an effort
+// level, a --comment flag and a target: at best ignored, leaving no verdict
+// line at all, and at worst perturbing the target parsing -- and firstpass
+// would not find out until it silently failed in production. As a system
+// prompt the instruction reaches the reviewing agent directly and the prompt
+// stays byte-identical to the form that has actually been exercised against
+// real claude.
+//
+// It is passed identically in both modes, so a dry-run report's "the verdict
+// would have been" is a genuine preview: the reviewer was asked exactly the
+// question a live run asks. The dry-run and live prompts still differ by
+// exactly --comment.
+//
+// It has to stand on its own, with no command adjacent to lean on, and it
+// states the severity rule because firstpass cannot apply it: firstpass never
+// sees a finding, only this line.
+const verdictInstruction = "You are running as firstpass: an automated first pass over a pull " +
+	"request, before any human has looked at it.\n\n" +
+	"When your review is complete, print exactly one of these two lines, verbatim, as the very " +
+	"last line of your output:\n" +
+	VerdictMarker + " approve\n" +
+	VerdictMarker + " findings\n\n" +
+	"Print `findings` if the review raised anything Critical or Important. Print `approve` if " +
+	"the review raised nothing at all, or only minor nits. Print nothing after that line, and " +
+	"no other line starting with " + VerdictMarker + "\n\n" +
+	"firstpass reads that line to decide whether to submit an approving review on the pull " +
+	"request or to leave it in the team's human review queue. It is the only thing firstpass " +
+	"can see about what you found: if the line is missing or reworded, firstpass submits no " +
+	"verdict at all."
+
 // ReportError reports that the review itself finished but its dry-run report
 // could not be written.
 //
@@ -80,10 +175,19 @@ func (e *ReportError) Unwrap() error { return e.Err }
 // so discarding the captured output on the failure path left nothing to read
 // at the worst possible moment. The report names the failure itself.
 func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef) (Result, error) {
-	args := append([]string{"-p", rr.Prompt(ref)}, rr.extraArgs...)
+	// extraArgs stays last: it is operator-controlled config, so it must keep
+	// being able to override anything firstpass sets for itself.
+	args := append([]string{
+		"-p", rr.Prompt(ref),
+		"--append-system-prompt", verdictInstruction,
+	}, rr.extraArgs...)
 
 	res, err := rr.r.Run(ctx, dir, rr.claude, args...)
-	out := Result{ExitCode: res.ExitCode, Stdout: res.Stdout}
+	out := Result{
+		ExitCode: res.ExitCode,
+		Stdout:   res.Stdout,
+		Verdict:  ParseVerdict(res.Stdout),
+	}
 
 	// runErr is the review's own failure, kept separate from any failure to
 	// write the report about it.
@@ -101,7 +205,7 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef) (Result,
 		return out, runErr
 	}
 
-	path, werr := rr.writeReport(ref, res.Stdout, runErr)
+	path, werr := rr.writeReport(ref, res.Stdout, out.Verdict, runErr)
 	if werr != nil {
 		if runErr != nil {
 			// The review failed and so did the report. The review failure is
@@ -114,10 +218,30 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef) (Result,
 	return out, runErr
 }
 
+// verdictNote is the dry-run report's line about the verdict. A dry run
+// submits none, so the report is the only place the operator can watch
+// firstpass decide before it decides for real.
+func verdictNote(v Verdict) string {
+	switch v {
+	case VerdictApprove:
+		return "**Verdict: the verdict would have been approve** — live, firstpass would have " +
+			"submitted an approving review on this pull request under your GitHub identity. " +
+			"Nothing was submitted here."
+	case VerdictFindings:
+		return "**Verdict: the verdict would have been findings** — live, firstpass would have " +
+			"submitted a COMMENT review, never request-changes, so the pull request stays in the " +
+			"team's human review queue. Nothing was submitted here."
+	default:
+		return "**Verdict: unknown — the reviewer printed no verdict line firstpass recognises.** " +
+			"Live, firstpass would have submitted no verdict at all and recorded the review as " +
+			"reviewed with an unknown verdict."
+	}
+}
+
 // writeReport writes the dry-run report. failure, when non-nil, is the
 // review's own failure and is recorded in the header, so a report that holds
 // only partial output cannot be mistaken for a complete review.
-func (rr *Runner) writeReport(ref prref.PRRef, body []byte, failure error) (string, error) {
+func (rr *Runner) writeReport(ref prref.PRRef, body []byte, verdict Verdict, failure error) (string, error) {
 	if err := os.MkdirAll(rr.reportsDir, 0o700); err != nil {
 		return "", err
 	}
@@ -126,6 +250,7 @@ func (rr *Runner) writeReport(ref prref.PRRef, body []byte, failure error) (stri
 
 	header := fmt.Sprintf("# Review of %s\n\n%s\n\nGenerated %s — dry run, nothing posted.\n",
 		ref.Key(), ref.URL(), time.Now().UTC().Format(time.RFC3339))
+	header += "\n" + verdictNote(verdict) + "\n"
 	if failure != nil {
 		header += fmt.Sprintf("\n**The review did not finish: %s**\n\nWhatever claude had printed "+
 			"before it stopped is below, and may be incomplete.\n", failure)

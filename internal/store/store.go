@@ -31,6 +31,31 @@ const (
 // how a review that was killed part-way through is detected.
 func (o Outcome) Terminal() bool { return o != OutcomeInFlight }
 
+// Verdict is the review verdict firstpass submitted on a pull request after a
+// successful review. It records what was submitted, not merely what the
+// reviewer decided: a verdict firstpass declined or failed to submit is not
+// one of the two positive values.
+type Verdict string
+
+const (
+	// VerdictNone is the zero value: there was a verdict and firstpass did
+	// not submit it. It covers a dry run, a submission that failed, and every
+	// row written before verdicts existed. Deliberately empty, so an old row
+	// on disk and a row with nothing submitted are the same state rather than
+	// two. It is distinct from VerdictUnknown, which says there was no
+	// verdict to submit in the first place.
+	VerdictNone Verdict = ""
+	// VerdictApproved means firstpass submitted an approving review.
+	VerdictApproved Verdict = "approved"
+	// VerdictFindings means firstpass submitted a COMMENT review because
+	// something Critical or Important was raised.
+	VerdictFindings Verdict = "findings"
+	// VerdictUnknown means the review ran and its comments are posted, but
+	// the reviewer printed no verdict line firstpass recognised, so nothing
+	// was submitted and nothing was guessed.
+	VerdictUnknown Verdict = "unknown"
+)
+
 // Review is the record for a pull request firstpass has acted on.
 type Review struct {
 	Key            string  `json:"key"`
@@ -45,6 +70,11 @@ type Review struct {
 	ExitCode   int       `json:"exit_code,omitempty"`
 	ReportPath string    `json:"report_path,omitempty"`
 	Detail     string    `json:"detail,omitempty"`
+	// Verdict is what firstpass submitted on the pull request. omitempty is
+	// load-bearing here, unlike on the time fields above: a row with no
+	// verdict must look exactly like the reviewed rows already in the
+	// database from before verdicts existed.
+	Verdict Verdict `json:"verdict,omitempty"`
 }
 
 // Pending is a pull request deferred to a later sweep.
