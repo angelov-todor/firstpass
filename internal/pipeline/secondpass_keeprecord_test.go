@@ -242,3 +242,9 @@ func TestARepostFromADisallowedOwnerIsRefusedAboveTheRecordGate(t *testing.T) {
 		}
 	})
 }
+
+// ghprOpen is an OPEN, non-draft pull request by a colleague at the given
+// head commit -- the shape every second-pass test needs from Inspect.
+func ghprOpen(headSHA string) ghpr.PRInfo {
+	return ghpr.PRInfo{State: "OPEN", Author: "colleague", HeadSHA: headSHA}
+}

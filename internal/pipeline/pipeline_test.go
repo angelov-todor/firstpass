@@ -114,15 +114,16 @@ type fakeRev struct {
 	// onRun runs after the review is recorded as having happened, where a
 	// Ctrl-C arriving as claude finishes would land.
 	onRun func()
-	// prevSHAs records the previousHeadSHA handed to each invocation, in
-	// order, so a test can prove a second pass told the reviewer which commit
-	// the pass before it looked at -- and that a first pass told it nothing.
-	prevSHAs []string
+	// prevPasses records the *review.PreviousPass handed to each invocation,
+	// in order, so a test can prove a later pass told the reviewer which
+	// commit the pass before it looked at and whether that pass finished --
+	// and that a first pass told it nothing at all.
+	prevPasses []*review.PreviousPass
 }
 
-func (f *fakeRev) Run(ctx context.Context, _ string, ref prref.PRRef, previousHeadSHA string) (review.Result, error) {
+func (f *fakeRev) Run(ctx context.Context, _ string, ref prref.PRRef, previous *review.PreviousPass) (review.Result, error) {
 	f.ran = append(f.ran, ref.Key())
-	f.prevSHAs = append(f.prevSHAs, previousHeadSHA)
+	f.prevPasses = append(f.prevPasses, previous)
 	// A cancelled context is an error, never a clean run: runner.OS returns
 	// ctx.Err() ahead of any exit status precisely so a review killed by a
 	// Ctrl-C or a deadline cannot be mistaken for one that finished.

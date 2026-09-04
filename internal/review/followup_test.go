@@ -34,7 +34,7 @@ func TestDryRunReportWriteFailureIsDistinguishableFromAReviewFailure(t *testing.
 	}}
 	rr := New(f, "claude", nil, true, blockedReportsDir(t))
 
-	res, err := rr.Run(context.Background(), "work", ref, "")
+	res, err := rr.Run(context.Background(), "work", ref, nil)
 	if err == nil {
 		t.Fatal("a report that could not be written must still be surfaced")
 	}
@@ -69,7 +69,7 @@ func TestReviewFailureIsNotAReportError(t *testing.T) {
 			f := &runner.Fake{Replies: []runner.Reply{tc.reply}}
 			rr := New(f, "claude", nil, tc.dry, t.TempDir())
 
-			_, err := rr.Run(context.Background(), "work", ref, "")
+			_, err := rr.Run(context.Background(), "work", ref, nil)
 			if err == nil {
 				t.Fatal("a failed review must be an error so the pipeline records needs_attention")
 			}
@@ -95,7 +95,7 @@ func TestDryRunWithNonZeroExitStillWritesAReport(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, true, dir)
 
-	res, err := rr.Run(context.Background(), "work", ref, "")
+	res, err := rr.Run(context.Background(), "work", ref, nil)
 	if err == nil {
 		t.Fatal("a non-zero exit must still be an error")
 	}
@@ -122,7 +122,7 @@ func TestDryRunWithNoOutputStillWritesAReportNamingTheFailure(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, true, dir)
 
-	res, err := rr.Run(context.Background(), "work", ref, "")
+	res, err := rr.Run(context.Background(), "work", ref, nil)
 	if err == nil {
 		t.Fatal("a killed review must be an error")
 	}
@@ -147,7 +147,7 @@ func TestLiveFailureWritesNoReport(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, false, dir)
 
-	if _, err := rr.Run(context.Background(), "work", ref, ""); err == nil {
+	if _, err := rr.Run(context.Background(), "work", ref, nil); err == nil {
 		t.Fatal("a non-zero exit must be an error")
 	}
 	entries, rerr := os.ReadDir(dir)

@@ -163,6 +163,24 @@ func ShortSHA(sha string) string {
 	return sha
 }
 
+// PreviousPass describes a pass that has already reviewed this pull request.
+// A nil *PreviousPass means this is the first pass.
+//
+// Two fields rather than a bare SHA, because "a pass has been here" and "that
+// pass finished" are different facts and the reviewer needs both. A replay --
+// whose documented use is a needs_attention pull request -- is exactly the
+// case where the second is false.
+type PreviousPass struct {
+	// HeadSHA is the commit that pass reviewed. It is also the evidence that
+	// there was a pass at all: only a record written once claude had started
+	// carries one.
+	HeadSHA string
+	// Incomplete says that pass did not finish. It was posting its findings
+	// one at a time when it stopped, so some may be on the pull request and
+	// some may not, and nothing can tell which.
+	Incomplete bool
+}
+
 // secondPassNote tells the reviewer that a pass has already been here. It is
 // appended to verdictInstruction and travels as --append-system-prompt for
 // exactly the reasons that instruction does: prose in the -p value becomes
@@ -173,18 +191,40 @@ func ShortSHA(sha string) string {
 // colleague's pull request -- which is the whole cost this feature could
 // impose and the only one it cannot detect for itself.
 //
-// It asks for attention on what changed rather than for an incremental diff,
-// and says why: the mirror force-updates refs/firstpass/N, so the
-// previously-reviewed commit can be unreachable in the checkout by now. A
+// The incomplete variant is not a hedge for its own sake. Telling the reviewer
+// that the earlier pass posted its findings, when that pass in fact died
+// part-way through posting them, is wrong in both directions: it invites a
+// duplicate of the comments that did land, and it invites silence about the
+// findings that never did. So that variant says plainly that nothing knows how
+// far the earlier pass got, asks the reviewer to check the pull request before
+// posting a comment, and asks it to raise anything that is not already there.
+//
+// Both variants ask for attention on what changed rather than for an
+// incremental diff, and say why: the mirror force-updates refs/firstpass/N, so
+// the previously-reviewed commit can be unreachable in the checkout by now. A
 // reviewer told to "diff against <sha>" would find nothing there and either
 // invent an answer or review nothing at all.
-func secondPassNote(previousHeadSHA string) string {
-	short := ShortSHA(previousHeadSHA)
-	return "A previous automated pass already reviewed this pull request at commit " + short +
+func secondPassNote(pp PreviousPass) string {
+	short := ShortSHA(pp.HeadSHA)
+
+	head := "A previous automated pass already reviewed this pull request at commit " + short +
 		" and posted its findings as inline comments on it.\n\n" +
 		"Concentrate on what has changed since " + short + ". Do not restate findings from that " +
 		"pass: they are already on the pull request, and repeating one puts a second copy of the " +
-		"same comment on the same line, which spends the author's time twice on one point.\n\n" +
+		"same comment on the same line, which spends the author's time twice on one point."
+	if pp.Incomplete {
+		head = "A previous automated pass began reviewing this pull request at commit " + short +
+			" and did not finish. Some of its findings may already be posted as inline comments " +
+			"on the pull request and some may not: it was posting them one at a time when it " +
+			"stopped, and firstpass cannot tell how far it got.\n\n" +
+			"Concentrate on what has changed since " + short + ". Before you post a finding, " +
+			"check whether that comment is already on the pull request, and do not post it again " +
+			"if it is: a second copy of the same comment on the same line spends the author's " +
+			"time twice on one point. Where a finding is not already there, raise it -- the " +
+			"earlier pass may never have got to it."
+	}
+
+	return head + "\n\n" +
 		"Review the pull request as it now stands, not a diff against " + short + ": firstpass " +
 		"force-updates the mirror ref it checks out, so " + short + " may no longer be reachable " +
 		"from the checkout you are looking at. Work out what has changed from the pull request " +
@@ -213,15 +253,14 @@ func (e *ReportError) Unwrap() error { return e.Err }
 // so discarding the captured output on the failure path left nothing to read
 // at the worst possible moment. The report names the failure itself.
 //
-// previousHeadSHA is the commit an earlier pass over this pull request
-// reviewed, and empty means this is the first pass. It changes only the
-// system prompt and the dry-run report's filename: the -p value is
-// byte-identical across passes, because everything in it is /code-review's
-// own arguments.
-func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previousHeadSHA string) (Result, error) {
+// previous describes a pass that has already reviewed this pull request, and
+// nil means this is the first pass. It changes only the system prompt and the
+// dry-run report's filename: the -p value is byte-identical across passes,
+// because everything in it is /code-review's own arguments.
+func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous *PreviousPass) (Result, error) {
 	system := verdictInstruction
-	if previousHeadSHA != "" {
-		system += "\n\n" + secondPassNote(previousHeadSHA)
+	if previous != nil {
+		system += "\n\n" + secondPassNote(*previous)
 	}
 	// extraArgs stays last: it is operator-controlled config, so it must keep
 	// being able to override anything firstpass sets for itself.
@@ -253,7 +292,7 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 		return out, runErr
 	}
 
-	path, werr := rr.writeReport(ref, previousHeadSHA, res.Stdout, out.Verdict, runErr)
+	path, werr := rr.writeReport(ref, previous, res.Stdout, out.Verdict, runErr)
 	if werr != nil {
 		if runErr != nil {
 			// The review failed and so did the report. The review failure is
@@ -294,16 +333,16 @@ func verdictNote(v Verdict) string {
 // which is what the operator needs to see what the new commits changed --
 // and the first pass's name is left exactly as it was, so nothing already on
 // disk moves.
-func (rr *Runner) writeReport(ref prref.PRRef, previousHeadSHA string, body []byte,
+func (rr *Runner) writeReport(ref prref.PRRef, previous *PreviousPass, body []byte,
 	verdict Verdict, failure error) (string, error) {
 
 	if err := os.MkdirAll(rr.reportsDir, 0o700); err != nil {
 		return "", err
 	}
 	name := fmt.Sprintf("%s_%s_%d.md", ref.Owner, ref.Repo, ref.Number)
-	if previousHeadSHA != "" {
+	if previous != nil {
 		name = fmt.Sprintf("%s_%s_%d_after_%s.md",
-			ref.Owner, ref.Repo, ref.Number, ShortSHA(previousHeadSHA))
+			ref.Owner, ref.Repo, ref.Number, ShortSHA(previous.HeadSHA))
 	}
 	path := filepath.Join(rr.reportsDir, name)
 

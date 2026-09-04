@@ -108,8 +108,12 @@ func TestARepostWithNewCommitsIsReviewedAgain(t *testing.T) {
 
 	// The reviewer has to be told, or it restates every finding the author has
 	// not fixed, on the same lines.
-	if got := h.rev.prevSHAs; len(got) != 1 || got[0] != oldSHA {
-		t.Errorf("previousHeadSHA handed to the reviewer = %v, want [%q]", got, oldSHA)
+	got := h.rev.prevPasses
+	if len(got) != 1 || got[0] == nil || got[0].HeadSHA != oldSHA {
+		t.Fatalf("previous pass handed to the reviewer = %+v, want one naming %q", got, oldSHA)
+	}
+	if got[0].Incomplete {
+		t.Error("Incomplete = true; a second pass only follows a review that finished")
 	}
 }
 
