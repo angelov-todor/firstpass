@@ -79,7 +79,7 @@ func Default() Config {
 		Interval:           Duration(5 * time.Minute),
 		DryRun:             true,
 		MaxReviewsPerSweep: 3,
-		ReviewTimeout:      Duration(20 * time.Minute),
+		ReviewTimeout:      Duration(30 * time.Minute),
 		ChatTimeout:        Duration(2 * time.Minute),
 		GHTimeout:          Duration(time.Minute),
 		CloneTimeout:       Duration(15 * time.Minute),

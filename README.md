@@ -56,12 +56,12 @@ actually see named spaces).
 ## Commands
 
 - `scan` — one sweep, then exit. Flags: `-print-only`, `-backfill N`,
-  `-live`. Also the intended Task Scheduler entry point.
+  `-live`, `-quiet`. Also the intended Task Scheduler entry point.
 - `watch` — sweep on a ticker until interrupted. Flag: `-live`.
 - `status` — print the review table: what's been reviewed, skipped, or
   deferred.
 - `replay <pr-url | owner/repo#n>` — force one PR through review again,
-  ignoring the dedupe record. Flag: `-live`.
+  ignoring the dedupe record. Flags: `-live`, `-quiet`.
 - `doctor` — preflight every external dependency.
 - `pause` / `resume` — write / remove a kill-switch file. While paused,
   sweeps still queue new PRs but run no reviews and post nothing.
@@ -91,9 +91,11 @@ Read this before running anything other than `doctor` or `scan -print-only`.
   prompt will read as instructions. See
   `docs/superpowers/reviews/2026-09-03-final-review-outcomes.md` for the
   full analysis and the mitigations that were considered but not applied.
-- **The review stage has not been verified end to end by the authors.**
-  Parsing and filtering have been checked against real chat history; running
-  `claude` against a real checkout and posting real comments has not. Run
-  one dry-run review (`scan -backfill N`, or `replay <url>`, without
-  `-live`) and read the resulting report before ever setting `dry_run:
-  false`.
+- **Posting has never been exercised.** Parsing and filtering were checked
+  against 200 messages of real chat history, and one dry-run `replay` has
+  been run end to end: it produced a substantive report in 12m15s, which is
+  why `review_timeout` defaults to 30m. What has *not* happened is a live
+  run — nothing has ever been posted to a pull request by this tool. Read
+  your own dry-run report (`scan -backfill N`, or `replay <url>`, without
+  `-live`) and satisfy yourself you would be happy for it to appear on a
+  colleague's PR before ever setting `dry_run: false`.

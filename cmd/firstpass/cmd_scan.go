@@ -21,7 +21,11 @@ func cmdScan(args []string) error {
 	printOnly := fs.Bool("print-only", false, "decide and print, changing no state")
 	live := fs.Bool("live", false, "post comments to GitHub even if dry_run is set in config")
 	backfill := fs.Int("backfill", 0, "take the last N messages, ignoring the watermark")
+	quiet := fs.Bool("quiet", false, "suppress progress output; the result table still prints")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := validateBackfill(*backfill); err != nil {
 		return err
 	}
 
@@ -30,6 +34,19 @@ func cmdScan(args []string) error {
 		return err
 	}
 	defer a.Close()
+
+	// Progress renders to stderr, never stdout: renderSweep below is the
+	// stdout output an operator may redirect to a file, and a heartbeat line
+	// corrupting that redirected output would be worse than the silence this
+	// exists to fix. The deferred stop is a safety net -- Handle already
+	// stops the heartbeat on every review_finished event -- so no heartbeat
+	// goroutine can outlive this command on any exit path.
+	renderer := wireProgress(a.pipe, *quiet, os.Stderr, a.cfg.ReviewTimeout.D())
+	defer func() {
+		if renderer != nil {
+			renderer.stopHeartbeat()
+		}
+	}()
 
 	rep, err := a.pipe.Sweep(context.Background(), pipeline.Options{
 		PrintOnly: *printOnly,
@@ -48,6 +65,23 @@ func cmdScan(args []string) error {
 		return err
 	}
 	renderSweep(os.Stdout, rep, *printOnly, a.cfg.DryRun)
+	return nil
+}
+
+// validateBackfill rejects a negative -backfill.
+//
+// A negative window is meaningless, and it used to be actively dangerous: the
+// pipeline's cold-start guard tested `Backfill == 0` while its window
+// selection tested `Backfill > 0`, so `scan -live -backfill -1` on a fresh
+// install fell between the two, skipped launch day's protection, posted on the
+// whole fetch_limit window and advanced the watermark. The pipeline's guard
+// now tests `<= 0` as well; this rejects the flag outright, so the operator is
+// told rather than silently given a plain sweep.
+func validateBackfill(n int) error {
+	if n < 0 {
+		return fmt.Errorf("-backfill must not be negative, got %d: pass a positive count of "+
+			"messages to re-scan, or omit the flag to sweep from the watermark", n)
+	}
 	return nil
 }
 

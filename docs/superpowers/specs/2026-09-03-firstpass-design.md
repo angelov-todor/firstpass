@@ -136,7 +136,7 @@ it, and leaves it alone. The user runs `replay` if another pass is wanted.
 
 A review timeout is the same hazard, not a transient error: the deadline can fire while `claude` is
 midway through posting. So a timeout is `needs_attention` too, never a retry. This is the reason
-`review_timeout` is generous (20m) — a timeout is a manual-intervention event, so it should only
+`review_timeout` is generous (30m, raised from 20m after a real review took 12m15s) — a timeout is a manual-intervention event, so it should only
 fire when something is genuinely stuck.
 
 ## Safety controls
@@ -151,7 +151,7 @@ fire when something is genuinely stuck.
    Refs queued while paused do **not** increment `attempts`, so a week-long pause cannot silently
    expire a backlog. A file rather than a signal, because it works when the daemon is wedged and it
    survives a restart.
-4. **Throttles.** `max_reviews_per_sweep: 3`, `review_timeout: 20m`, strictly one review at a time.
+4. **Throttles.** `max_reviews_per_sweep: 3`, `review_timeout: 30m`, strictly one review at a time.
 5. **`allow_owners`, defaulting to `[Example-Org]`.** A PR whose owner is not on the list is
    recorded terminal and never touched. This is not the same control as `deny_repos`, and it matters
    more: the space is a chat room, so someone will eventually paste a link to an unrelated
@@ -170,7 +170,7 @@ github_login: angelov-todor
 interval: 5m
 dry_run: true
 max_reviews_per_sweep: 3
-review_timeout: 20m
+review_timeout: 30m
 pending_max_attempts: 20
 pending_max_age: 168h
 allow_owners:

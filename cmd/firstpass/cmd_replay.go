@@ -16,11 +16,12 @@ func cmdReplay(args []string) error {
 	fs := flag.NewFlagSet("replay", flag.ExitOnError)
 	cfgPath := fs.String("config", config.DefaultConfigPath(), "config file")
 	live := fs.Bool("live", false, "post comments to GitHub even if dry_run is set in config")
+	quiet := fs.Bool("quiet", false, "suppress progress output; the result table still prints")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: firstpass replay [-live] <pr-url | owner/repo#n>")
+		return errors.New("usage: firstpass replay [-live] [-quiet] <pr-url | owner/repo#n>")
 	}
 
 	refs := prref.Extract(fs.Arg(0))
@@ -33,6 +34,17 @@ func cmdReplay(args []string) error {
 		return err
 	}
 	defer a.Close()
+
+	// See cmdScan for why this is stderr-only and why the deferred stop is
+	// belt-and-braces rather than the only thing that stops the heartbeat.
+	// replay is exactly the command whose 12-minute silence prompted this
+	// feature.
+	renderer := wireProgress(a.pipe, *quiet, os.Stderr, a.cfg.ReviewTimeout.D())
+	defer func() {
+		if renderer != nil {
+			renderer.stopHeartbeat()
+		}
+	}()
 
 	d, err := a.pipe.ReviewOne(context.Background(), refs[0], pipeline.Options{})
 	if err != nil {

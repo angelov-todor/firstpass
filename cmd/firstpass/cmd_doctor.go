@@ -21,6 +21,37 @@ type check struct {
 	detail string
 }
 
+const (
+	// doctorCheckTimeout bounds one external dependency, not the whole
+	// command, so a slow one cannot mask the others.
+	//
+	// 30s, not 20s: `claude --version` and `gh auth status` are node and Go
+	// binaries that hit the network on a cold Windows box, behind a virus
+	// scanner that sees each of them for the first time. Slow-but-working is
+	// the common case there, and reporting a false failure from doctor -- the
+	// one command whose whole job is to say whether the dependencies are
+	// healthy -- is worse than waiting another ten seconds for the truth.
+	doctorCheckTimeout = 30 * time.Second
+	// doctorOverallTimeout keeps the command itself bounded, and must leave
+	// real headroom over the sum of the checks. Four sequential checks at
+	// doctorCheckTimeout are already 4 x 30s = 2m, so a 2m overall budget gave
+	// none: the last check to run -- "google chat reachable", the one
+	// fatalChatBanner explicitly sends the operator to -- lost exactly the
+	// pre-check time and would fail on the context rather than on its merits,
+	// reaching a zero deadline in the limit.
+	// That is the exact misattribution the per-check deadline exists to
+	// prevent, so the overall budget has to exceed the sum, not equal it.
+	doctorOverallTimeout = 3 * time.Minute
+)
+
+// withCheckTimeout runs one doctor check under its own deadline, derived from
+// the command's overall deadline so both bounds apply and the shorter wins.
+func withCheckTimeout(parent context.Context, d time.Duration, fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(parent, d)
+	defer cancel()
+	return fn(ctx)
+}
+
 func cmdDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	cfgPath := fs.String("config", config.DefaultConfigPath(), "config file")
@@ -28,8 +59,13 @@ func cmdDoctor(args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	// One deadline per check, not one for the command. Shared, a slow `gh auth
+	// status` could consume the whole budget and the Google Chat check — the
+	// one fatalChatBanner explicitly sends the operator to run — would fail on
+	// a timeout rather than on its own merits, sending them to
+	// re-authenticate the wrong thing entirely.
+	overall, cancelAll := context.WithTimeout(context.Background(), doctorOverallTimeout)
+	defer cancelAll()
 
 	var checks []check
 	add := func(name string, err error, detail string) {
@@ -48,12 +84,26 @@ func cmdDoctor(args []string) error {
 		add("chat.py present", exists(cfg.Paths.ChatScript), cfg.Paths.ChatScript)
 
 		r := runner.OS{}
-		add("git works", version(ctx, r, cfg.Paths.Git, "--version"), cfg.Paths.Git)
-		add("claude works", version(ctx, r, cfg.Paths.Claude, "--version"), cfg.Paths.Claude)
-		add("gh authenticated", ghAuth(ctx, r, cfg.Paths.GH), cfg.Paths.GH)
+		bounded := func(fn func(context.Context) error) error {
+			return withCheckTimeout(overall, doctorCheckTimeout, fn)
+		}
+		add("git works", bounded(func(ctx context.Context) error {
+			return version(ctx, r, cfg.Paths.Git, "--version")
+		}), cfg.Paths.Git)
+		add("claude works", bounded(func(ctx context.Context) error {
+			return version(ctx, r, cfg.Paths.Claude, "--version")
+		}), cfg.Paths.Claude)
+		add("gh authenticated", bounded(func(ctx context.Context) error {
+			return ghAuth(ctx, r, cfg.Paths.GH)
+		}), cfg.Paths.GH)
 
 		ch := chat.New(r, cfg.Paths.Python, cfg.Paths.ChatScript, cfg.Space)
-		named, nerr := ch.HasNamedRooms(ctx)
+		var named bool
+		nerr := bounded(func(ctx context.Context) error {
+			var err error
+			named, err = ch.HasNamedRooms(ctx)
+			return err
+		})
 		switch {
 		case nerr != nil:
 			add("google chat reachable", nerr, "")

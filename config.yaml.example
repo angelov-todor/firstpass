@@ -7,6 +7,10 @@
 #
 # A field left out of this file simply keeps its default. You do not need to
 # copy every line below; this file documents all of them for reference.
+#
+# Leaving a field out is not the same as giving it an empty value: `key: ""`
+# and `key: []` override the default with that empty value rather than falling
+# back to it. Comment the key out instead.
 
 # ---------------------------------------------------------------------------
 # REQUIRED — no default. firstpass will refuse to run until these are set.
@@ -70,8 +74,11 @@ max_reviews_per_sweep: 3
 
 # How long a single review may run before it is treated as needs_attention
 # (never retried automatically — a timeout may have fired mid-post).
-# Default: 20m
-review_timeout: 20m
+# A real review of a 3-commit PR took 12m15s -- 61% of the old 20m default --
+# so 20m left too little headroom before a slow-but-fine review was silently
+# converted into a needs_attention the operator has to chase down by hand.
+# Default: 30m
+review_timeout: 30m
 
 # Timeout for the chat-reading subprocess.
 # Default: 2m
@@ -128,8 +135,12 @@ claude_args:
 
 # Where firstpass keeps its database, bare mirrors, worktrees and reports.
 # Must be an absolute path.
+#
+# Left out (as below), it defaults to %LOCALAPPDATA%\firstpass. Do not write
+# `state_dir: ""`: an explicit empty string overrides the default rather than
+# falling back to it, and firstpass would refuse to start.
 # Default: %LOCALAPPDATA%\firstpass
-state_dir: ""
+# state_dir: C:\Users\you\AppData\Local\firstpass
 
 paths:
   # Path to the chat-reading script described in the REQUIRED section above.

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -76,6 +77,27 @@ func TestTerminalClassification(t *testing.T) {
 	}
 }
 
+// A pending row written before LastPausedAt existed carries no such field, and
+// must decode as the zero value: not currently parked by a pause, which is
+// exactly what it was. The store encodes with encoding/json, so this is the
+// whole of the compatibility question.
+func TestPendingWithoutLastPausedAtDecodesAsNotPaused(t *testing.T) {
+	const legacy = `{"key":"o/r#2","first_seen":"2026-08-28T00:00:00Z",` +
+		`"attempts":1,"last_attempt":"2026-09-01T00:00:00Z","last_reason":"draft"}`
+
+	var p Pending
+	if err := json.Unmarshal([]byte(legacy), &p); err != nil {
+		t.Fatal(err)
+	}
+	if !p.LastPausedAt.IsZero() {
+		t.Errorf("LastPausedAt = %s, want the zero value: an older row was never parked by a pause",
+			p.LastPausedAt)
+	}
+	if !p.FirstSeen.Equal(time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("FirstSeen = %s; the accrued age of an older row must survive the upgrade", p.FirstSeen)
+	}
+}
+
 func TestPendingLifecycle(t *testing.T) {
 	s := openAt(t, t.TempDir())
 
@@ -115,7 +137,7 @@ func TestDeletePendingOnAbsentKeyIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestReviewsAndDeleteReview(t *testing.T) {
+func TestReviews(t *testing.T) {
 	s := openAt(t, t.TempDir())
 	if err := s.PutReview(Review{Key: "o/r#1", Outcome: OutcomeReviewed}); err != nil {
 		t.Fatal(err)
@@ -130,12 +152,5 @@ func TestReviewsAndDeleteReview(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("Reviews() = %d entries, want 2", len(all))
-	}
-
-	if err := s.DeleteReview("o/r#1"); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok, _ := s.Review("o/r#1"); ok {
-		t.Error("DeleteReview must clear the record so replay can re-review")
 	}
 }

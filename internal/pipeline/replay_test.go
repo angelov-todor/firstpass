@@ -63,6 +63,19 @@ func TestReviewOneStillHonoursTheOwnerAllowlist(t *testing.T) {
 	if len(h.rev.ran) != 0 {
 		t.Error("an outside org must never be reviewed, even on an explicit replay")
 	}
+	// The returned Decision is what the operator reads once; the record is
+	// what stops the ref being re-decided from scratch by every later sweep
+	// that finds the link still in the space.
+	rec, ok, _ := h.st.Review(outside.Key())
+	if !ok {
+		t.Fatal("the skip must be recorded, or every later sweep re-decides this ref from scratch")
+	}
+	if rec.Outcome != store.OutcomeSkippedOwner {
+		t.Errorf("Outcome = %q, want %q", rec.Outcome, store.OutcomeSkippedOwner)
+	}
+	if rec.Detail == "" {
+		t.Error("the record must say why it was skipped")
+	}
 }
 
 // A replay is not subject to the sweep throttle. It uses a real cap value:

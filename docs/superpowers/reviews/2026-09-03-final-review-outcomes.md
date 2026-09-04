@@ -2,7 +2,8 @@
 
 **Date:** 2026-09-03
 **Branch:** `firstpass-impl`
-**Status:** implementation complete and reviewed; two items need the owner's decision before a live run
+**Status:** implementation complete and reviewed. Decision 1 has since been narrowed by the owner
+and decision 2 is closed — see the notes under each. A live run has still never happened.
 
 All twelve planned tasks were implemented, each individually reviewed for spec compliance and
 quality, with eight fix rounds. A whole-branch review then found defects that existed only in the
@@ -48,7 +49,28 @@ Nothing in this area was changed by the fix wave: `ClaudeArgs` is byte-identical
 specified, deliberately, because tightening it could break the review's ability to post at all and
 that is the owner's call.
 
-## Open decision 2 — the review stage has never been executed
+### Owner's decision, 2026-09-04 — NARROWED, not closed
+
+The owner has accepted the subprocess **reading** across their workspace, on the grounds that wider
+context produces better reviews. That is well-founded: in the first real dry run the reviewer opened
+a file in a *different* repository to check the premise of the change it was reviewing, and its
+findings were stronger for it. Mitigation 3 (`--add-dir` restrictions) is therefore declined.
+
+What that decision does **not** cover, and what remains open:
+
+- **Writing.** The subprocess inherits the environment, including a `GITHUB_TOKEN` whose scopes
+  include `admin:org` and `admin:enterprise`. Reading being desirable places no limit on pushing,
+  commenting, or deleting anywhere that token reaches — including repositories outside
+  `allow_owners`, which gates only which PRs firstpass *chooses* to review.
+- **Injection.** The reviewed checkout is the pull request author's code. On a fork PR that author is
+  outside the org, and the checkout may carry its own `CLAUDE.md`, `.claude/settings.json` or
+  `.claude/skills/*`, which a headless agent with no human at the prompt reads as instructions.
+
+Mitigations 1, 2 and 4 above still stand unaddressed, and mitigation 2 (`--settings`) is the cheapest
+answer to the injection half specifically. Accepted knowingly for now; recorded here so the next
+reader does not mistake the narrowing for a clean bill of health.
+
+## Decision 2 — CLOSED: the review stage has now been executed
 
 The operator checkpoint that ran was `scan -print-only -backfill 200`, which validated PR extraction
 against 200 real messages (70 references found, independently cross-checked as exactly right) but
@@ -60,10 +82,19 @@ detached HEAD, no `refs/remotes/origin/*`, and an empty `git diff`. Both halves 
 `8c49966` — the prompt now names the PR (`/code-review <url>`), and the mirror fetches branches into
 remote-tracking refs so a diff base resolves.
 
-**Those fixes are structurally verified but not end-to-end verified.** Confirming them means running
-a real `claude` review over a checkout, which is exactly the action open decision 1 makes risky. So
-the sequence is: settle decision 1, then run one dry-run review and read the report, then consider
-`dry_run: false`.
+**Both fixes are now confirmed end to end.** On 2026-09-04 the owner ran a dry-run
+`replay` of a real 3-commit pull request. It completed in 12m15s and produced a substantive report:
+the reviewer saw the actual diff (`master...HEAD`, 3 commits), which proves both halves — the PR URL
+reached `/code-review`, and the mirror's remote-tracking refs gave it a resolvable base. It returned
+four findings, each with a file:line and a concrete mechanism.
+
+Two consequences were folded back into the code. `review_timeout` went 20m → 30m, because 12m15s is
+61% of the old budget and a timeout becomes `needs_attention` that is never retried. And the run was
+silent for its whole 12 minutes while holding the store lock, so `status` could not be run either —
+which produced the progress-output feature.
+
+**Still unverified: posting.** A live run has never happened, so `/code-review --comment` finding the
+pull request and writing to it is the one part of the path still taken on faith.
 
 The plan's Task 11 Step 7 was a "read a real dry-run report" checkpoint. It was not run, and that
 omission is why the composition defect survived twelve per-task reviews: in the review package's
@@ -71,16 +102,19 @@ slice the prompt looked correct, and in the worktree package's slice the checkou
 
 ## Parked findings
 
-Real, non-blocking, deliberately not fixed. Two are worth knowing before a live run.
+Real, non-blocking, deliberately not fixed at the time. Two are worth knowing before a live run.
+
+Items 2 and 4 were subsequently fixed on the `review-followups` branch and are marked below; the rest
+still stand, as do both open decisions above.
 
 | # | Finding | Why parked |
 |---|---|---|
 | 1 | **Legacy mixed-case store keys stop deduping.** `ParseKey` now folds case but a stored `Review.Key` keeps its original spelling, so a lookup misses a pre-existing mixed-case row and that PR would be re-reviewed and re-commented. | The live `state.db` was checked and holds no PR keys, so there is no impact on this machine. It matters only for a database that acquires rows before another machine upgrades. A rekey-on-read in `recoverInFlight` would settle it. |
-| 2 | **A transient git failure destroys a healthy mirror.** `mirrorUsable` maps any failure of `git config --get remote.origin.url` — including "could not run git at all" — to "not usable", and `Prepare` then removes the mirror. | Rebuildable data only. Distinguishing "exit 1" from "could not run" closes it. |
+| 2 | ~~**A transient git failure destroys a healthy mirror.** `mirrorUsable` maps any failure of `git config --get remote.origin.url` — including "could not run git at all" — to "not usable", and `Prepare` then removes the mirror.~~ | **FIXED** on `review-followups`. `gitExit` now exposes the exit code, so only "git ran and reported no origin" discards the mirror; an inability to run git is returned as an error and the ref is deferred. |
 | 3 | `WatermarkGap` can hold the watermark permanently if the watermark message is *deleted* from the space, and `-backfill` (the printed remedy) is itself a non-advancing case. | Reviews still progress via store dedupe; it is a stuck watermark plus a per-tick warning, not lost work. |
-| 4 | The message-ordering assertion false-positives if the newest message lacks `createTime` (zero time is `Before` everything). | Guarding on `!IsZero()` at both ends would fix it. |
+| 4 | ~~The message-ordering assertion false-positives if the newest message lacks `createTime` (zero time is `Before` everything).~~ | **FIXED** on `review-followups`. The comparison now applies only when both endpoints carry a non-zero `CreateTime`; a genuine oldest-first payload is still refused. |
 | 5 | `gh_timeout: 1m` now interacts with `pending_max_attempts`: a persistently slow `gh` expires a PR terminally after ~20 sweeps, where before it was merely slow. | Accepted trade for having a timeout at all. |
-| 6 | `watch`'s store-release window can collapse to milliseconds, because a sweep may legitimately run `3 × 20m` against a 5-minute interval. | The requirement (release between ticks) is met; the observability goal behind it only partly. |
+| 6 | `watch`'s store-release window can collapse to milliseconds, because a sweep may legitimately run `3 × 30m` against a 5-minute interval — a 90-minute window in which `status`, `scan` and `replay` cannot open the store. (`review_timeout` was 20m when this was found and is now 30m, so the window is half an hour longer than the number originally recorded here.) | The requirement (release between ticks) is met; the observability goal behind it only partly. |
 | 7 | `interval` is the one config field `watch` does not hot-reload — the ticker is built once. | Inconsistent rather than wrong. |
 | 8 | `TestReviewOneIgnoresThePerSweepCap` is now vacuous by construction: a replay's fresh `SweepReport` starts at zero attempts, so the cap gate cannot trip. | Direct consequence of a fix instruction; the invariant now holds by construction. Residual value is its non-mutation assertion. |
 

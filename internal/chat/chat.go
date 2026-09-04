@@ -111,13 +111,22 @@ func (c *Client) Fetch(ctx context.Context, sinceName string, limit int) ([]Mess
 		return nil, false, &APIError{Code: lr.Error.Code, Status: lr.Error.Status, Message: lr.Error.Message}
 	}
 
-	if n := len(lr.Messages); n > 1 && lr.Messages[0].CreateTime.Before(lr.Messages[n-1].CreateTime) {
-		return nil, false, fmt.Errorf(
-			"chat.py get-messages returned messages oldest-first (%s before %s): the script's ordering "+
-				"changed, so the watermark logic cannot be trusted; pass an explicit newest-first order "+
-				"or fix chat.py before sweeping again",
-			lr.Messages[0].CreateTime.Format(time.RFC3339),
-			lr.Messages[n-1].CreateTime.Format(time.RFC3339))
+	if n := len(lr.Messages); n > 1 {
+		newest, oldest := lr.Messages[0].CreateTime, lr.Messages[n-1].CreateTime
+		// Both endpoints must carry a timestamp before they can be compared. A
+		// message whose payload omits createTime decodes to the zero time,
+		// which is Before everything, so comparing it turned a single
+		// malformed message into a hard failure of every sweep: no messages
+		// returned and nothing reviewed until it scrolled out of the window.
+		// An absent timestamp says nothing about the ordering; only two real
+		// ones do.
+		if !newest.IsZero() && !oldest.IsZero() && newest.Before(oldest) {
+			return nil, false, fmt.Errorf(
+				"chat.py get-messages returned messages oldest-first (%s before %s): the script's ordering "+
+					"changed, so the watermark logic cannot be trusted; pass an explicit newest-first order "+
+					"or fix chat.py before sweeping again",
+				newest.Format(time.RFC3339), oldest.Format(time.RFC3339))
+		}
 	}
 
 	if sinceName == "" {

@@ -33,16 +33,18 @@ func (o Outcome) Terminal() bool { return o != OutcomeInFlight }
 
 // Review is the record for a pull request firstpass has acted on.
 type Review struct {
-	Key            string    `json:"key"`
-	Outcome        Outcome   `json:"outcome"`
-	HeadSHA        string    `json:"head_sha,omitempty"`
-	TriggerMessage string    `json:"trigger_message,omitempty"`
-	StartedAt      time.Time `json:"started_at,omitempty"`
-	DecidedAt      time.Time `json:"decided_at,omitempty"`
-	DurationMS     int64     `json:"duration_ms,omitempty"`
-	ExitCode       int       `json:"exit_code,omitempty"`
-	ReportPath     string    `json:"report_path,omitempty"`
-	Detail         string    `json:"detail,omitempty"`
+	Key            string  `json:"key"`
+	Outcome        Outcome `json:"outcome"`
+	HeadSHA        string  `json:"head_sha,omitempty"`
+	TriggerMessage string  `json:"trigger_message,omitempty"`
+	// No omitempty on these two: it is inert on a struct type, so the encoder
+	// emits the zero time either way. See LastPausedAt below.
+	StartedAt  time.Time `json:"started_at"`
+	DecidedAt  time.Time `json:"decided_at"`
+	DurationMS int64     `json:"duration_ms,omitempty"`
+	ExitCode   int       `json:"exit_code,omitempty"`
+	ReportPath string    `json:"report_path,omitempty"`
+	Detail     string    `json:"detail,omitempty"`
 }
 
 // Pending is a pull request deferred to a later sweep.
@@ -52,6 +54,20 @@ type Pending struct {
 	Attempts    int       `json:"attempts"`
 	LastAttempt time.Time `json:"last_attempt"`
 	LastReason  string    `json:"last_reason"`
+
+	// LastPausedAt is when this entry was last observed during a paused sweep,
+	// zero when the entry is not currently parked by a pause.
+	//
+	// It is how the pipeline stops the expiry clock during a pause without
+	// discarding the age accrued before it: each paused sweep shifts FirstSeen
+	// forward by the interval since the previous paused sighting, so only the
+	// paused time is excluded. A row written before this field existed decodes
+	// as zero, which is exactly right -- it was not parked by a pause.
+	//
+	// No omitempty: it is inert on a struct type, so the encoder would emit
+	// the zero time regardless. Claiming otherwise invites the wrong
+	// inference about what an unpaused row looks like on disk.
+	LastPausedAt time.Time `json:"last_paused_at"`
 }
 
 // Watermark is the newest chat message already processed. The message name is
@@ -113,9 +129,6 @@ func (s *Store) Review(key string) (Review, bool, error) {
 }
 
 func (s *Store) PutReview(r Review) error { return s.put(bucketReviews, []byte(r.Key), r) }
-
-// DeleteReview clears a terminal record so replay can review the PR again.
-func (s *Store) DeleteReview(key string) error { return s.del(bucketReviews, key) }
 
 func (s *Store) Reviews() ([]Review, error) {
 	var out []Review

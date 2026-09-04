@@ -94,6 +94,12 @@ func watchSweep(ctx context.Context, cfgPath string, live bool, log *slog.Logger
 	}
 	defer a.Close()
 
+	// watch has no plain-text progress renderer and no heartbeat goroutine:
+	// its output is a structured log an operator is already watching, not a
+	// terminal or a redirected result table, so the same events are routed
+	// through slog at INFO instead -- see slogProgressHandler.
+	a.pipe.Progress = slogProgressHandler(a.log)
+
 	rep, err := a.pipe.Sweep(ctx, pipeline.Options{})
 	if err != nil {
 		return err
