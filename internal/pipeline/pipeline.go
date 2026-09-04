@@ -612,7 +612,13 @@ func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
 			continue
 		}
 		seen[pd.Key] = true
-		out = append(out, candidate{ref: ref})
+		// The provenance of the park comes back with it, so a deferred second
+		// pass can still tell that a post asked for it and when. A row that
+		// records none yields none, which is the same anonymous candidate this
+		// used to produce for every ref.
+		out = append(out, candidate{
+			ref: ref, trigger: pd.TriggerMessage, triggerAt: pd.TriggerTime,
+		})
 	}
 	return out
 }
@@ -671,7 +677,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 			// A read failure must still park the ref -- otherwise it falls out of
 			// every bucket while the watermark advances past the message that
 			// produced it, and it is never seen again.
-			note(p.hold(ref, "store read failed", opts))
+			note(p.hold(c, "store read failed", opts))
 			return dec(ActionDefer, "store read failed")
 		} else if ok {
 			if !prev.Outcome.Terminal() {
@@ -733,7 +739,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	//     survives: a ref that had waited six days before the pause has still
 	//     waited six days after it.
 	if rep.Paused || rep.pausedMidSweep {
-		note(p.holdPaused(ref, "paused", opts))
+		note(p.holdPaused(c, "paused", opts))
 		return dec(ActionDefer, "paused")
 	}
 
@@ -750,7 +756,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 			// enough -- that only guarantees the ref is offered again, not
 			// that this sweep declines to review it now.
 			note(err)
-			note(p.hold(ref, "pending read failed", opts))
+			note(p.hold(c, "pending read failed", opts))
 			return dec(ActionDefer, "pending read failed")
 		}
 		if expired {
@@ -762,7 +768,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// failure, and letting it burn attempts would expire a backlog over
 	// nothing but bad luck in scheduling.
 	if rep.reviewAttempts >= p.Cfg.MaxReviewsPerSweep {
-		note(p.hold(ref, "per-sweep cap reached", opts))
+		note(p.hold(c, "per-sweep cap reached", opts))
 		return dec(ActionDefer, "per-sweep cap reached")
 	}
 
@@ -771,7 +777,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	info, err := p.PRs.Inspect(ictx, ref)
 	cancelInspect()
 	if err != nil {
-		note(p.deferAttempt(ref, "inspect failed: "+err.Error(), opts))
+		note(p.deferAttempt(c, "inspect failed: "+err.Error(), opts))
 		return dec(ActionDefer, "inspect failed: "+err.Error())
 	}
 
@@ -819,7 +825,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	if info.IsDraft {
 		// Deferred, not terminal: a draft is routinely marked ready later, and
 		// by then the message has scrolled past the watermark.
-		note(p.deferAttempt(ref, "draft", opts))
+		note(p.deferAttempt(c, "draft", opts))
 		return dec(ActionDefer, "draft")
 	}
 	if strings.EqualFold(info.Author, p.Cfg.GithubLogin) {
@@ -842,7 +848,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	dir, cleanup, err := p.WTs.Prepare(wctx, ref)
 	cancelPrepare()
 	if err != nil {
-		note(p.deferAttempt(ref, "worktree failed: "+err.Error(), opts))
+		note(p.deferAttempt(c, "worktree failed: "+err.Error(), opts))
 		return dec(ActionDefer, "worktree failed: "+err.Error())
 	}
 	defer cleanup()
@@ -854,7 +860,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// No attempt is counted: a pause is not a failure of this PR.
 	if p.paused() {
 		rep.pausedMidSweep = true
-		note(p.holdPaused(ref, "paused after the worktree was prepared", opts))
+		note(p.holdPaused(c, "paused after the worktree was prepared", opts))
 		return dec(ActionDefer, "paused before the review started")
 	}
 
@@ -897,7 +903,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		// The worktree was already prepared -- a clone happened -- so this
 		// must still park the ref, or it is discarded with nothing to show
 		// for the clone and never reconsidered.
-		note(p.hold(ref, "could not record in_flight", opts))
+		note(p.hold(c, "could not record in_flight", opts))
 		return dec(ActionDefer, "could not record in_flight")
 	}
 
@@ -1231,8 +1237,8 @@ func (p *Pipeline) terminalSkip(ref prref.PRRef, previous *store.Review, o store
 	return nil
 }
 
-func (p *Pipeline) hold(ref prref.PRRef, reason string, opts Options) error {
-	return p.upsertPending(ref, reason, false, false, opts)
+func (p *Pipeline) hold(c candidate, reason string, opts Options) error {
+	return p.upsertPending(c, reason, false, false, opts)
 }
 
 // holdPaused parks a ref during a pause, and is the only caller that stops the
@@ -1260,13 +1266,13 @@ func (p *Pipeline) hold(ref prref.PRRef, reason string, opts Options) error {
 // Nothing else may stop the clock: every other park clears LastPausedAt, since
 // leaving it set would credit the pause with the unpaused time since the
 // resume.
-func (p *Pipeline) holdPaused(ref prref.PRRef, reason string, opts Options) error {
-	return p.upsertPending(ref, reason, false, true, opts)
+func (p *Pipeline) holdPaused(c candidate, reason string, opts Options) error {
+	return p.upsertPending(c, reason, false, true, opts)
 }
 
 // deferAttempt parks a ref and counts an attempt against its expiry budget.
-func (p *Pipeline) deferAttempt(ref prref.PRRef, reason string, opts Options) error {
-	return p.upsertPending(ref, reason, true, false, opts)
+func (p *Pipeline) deferAttempt(c candidate, reason string, opts Options) error {
+	return p.upsertPending(c, reason, true, false, opts)
 }
 
 // upsertPending writes nothing in print-only mode, so a dry run cannot burn
@@ -1277,7 +1283,8 @@ func (p *Pipeline) deferAttempt(ref prref.PRRef, reason string, opts Options) er
 // the expiry clock, and only ever by shifting FirstSeen forward by paused time
 // as that time accrues; see holdPaused for why, and why every other park
 // clears LastPausedAt instead.
-func (p *Pipeline) upsertPending(ref prref.PRRef, reason string, countAttempt, paused bool, opts Options) error {
+func (p *Pipeline) upsertPending(c candidate, reason string, countAttempt, paused bool, opts Options) error {
+	ref := c.ref
 	if opts.PrintOnly || opts.replay {
 		return nil
 	}
@@ -1302,6 +1309,15 @@ func (p *Pipeline) upsertPending(ref prref.PRRef, reason string, countAttempt, p
 	default:
 		pd.FirstSeen = pd.FirstSeen.Add(now.Sub(pd.LastPausedAt))
 		pd.LastPausedAt = now
+	}
+	// Set, never cleared. A ref re-offered from this bucket carries the
+	// trigger back out again, so the round trip preserves it -- but a park
+	// from a path that names no chat message must leave what an earlier park
+	// recorded alone, or one anonymous defer would strand the re-post for
+	// good.
+	if c.trigger != "" {
+		pd.TriggerMessage = c.trigger
+		pd.TriggerTime = c.triggerAt
 	}
 	if countAttempt {
 		pd.Attempts++

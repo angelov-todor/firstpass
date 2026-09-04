@@ -61,19 +61,32 @@ All three of these must hold, or the re-post is skipped:
    re-post is not consent to that. Every skipped outcome fails for the plainer
    reason that nothing was ever reviewed.
 2. The re-post is a **different chat message** from the one that triggered the
-   recorded review. The same message can still be sitting in the fifty-message
-   fetch window on the next sweep — a `-backfill`, or a watermark gap, will
-   offer it again — and a PR re-offered from the backlog names no message at
-   all. Neither is a re-post.
-3. The **live head SHA differs** from the recorded one. This is the invariant:
-   no pull request is ever reviewed twice for the same commit, because the
-   first pass's comments are already on those exact lines.
+   recorded review, **and it was posted after that review finished**. The name
+   check alone answers the wrong question. The same message can still be
+   sitting in the fifty-message fetch window on the next sweep, and both a
+   `-backfill` and a watermark gap re-offer *older* posts by design — while
+   the sweep picks the oldest message carrying a link and the record holds the
+   newest one seen. So the names differ, and an ordinary push nobody
+   re-posted would otherwise become a second review. Requiring the post to be
+   newer than the review settles all of it. A PR re-offered from the backlog
+   carries the post that parked it, so a deferred second pass can still
+   retry; one with no post recorded is not a re-post at all.
+3. The **live head SHA is not a commit any pass has already reviewed** — not
+   merely different from the last one. This is the invariant: no pull request
+   is ever reviewed twice for the same commit, because that pass's comments
+   are already on those exact lines. A head force-pushed back to an earlier
+   reviewed commit is refused for the same reason as one that never moved.
 
-Re-posted with no new commits, the record's trigger message is updated to the
-new post and nothing else about it changes, so the same re-post is not
-re-inspected on every sweep for as long as it sits in the window. That costs
-one `gh pr view` per re-post that turns out to have nothing new in it, which
-is the only new external call this feature makes.
+Re-posted at an already-reviewed commit, the record's trigger message is
+updated to the new post and nothing else about it changes, so the same re-post
+is not re-inspected on every sweep for as long as it sits in the window.
+
+The cost is one `gh pr view` per qualifying re-post — every re-post that gets
+past conditions 1 and 2, not only the ones that turn out to have nothing new.
+A re-post of a PR that has since been merged, been put back into draft or
+changed hands pays that call too, and those skip *without* advancing the
+recorded trigger, so each later re-post or re-scan of the same post pays it
+again. All of them are reads; no new write of any kind is made.
 
 `firstpass status` marks a later pass — `reviewed / findings (pass 2)`. A row
 written before this feature existed has no pass number and reads as the first
@@ -146,10 +159,16 @@ Three consequences worth knowing:
   denied repo, merged, closed, a draft, your own PR — gets **no reaction at
   all**. Nothing was reviewed, so there is nothing to report, and a bare ✅
   would be the first the team heard of it.
-- `firstpass replay` and PRs re-offered from the backlog react to nothing on
-  the way in. Neither identifies a chat message. They do still finish a
-  message off: the sweep that decides a message's last pull request adds its
-  result reaction, whichever path decided it.
+- `firstpass replay` reacts to nothing on the way in: its trigger is the
+  literal `replay` and identifies no chat message. A PR re-offered from the
+  backlog **does** now react, because a parked PR keeps a record of the post
+  that offered it — so a draft that becomes ready a day later, or a review the
+  per-sweep cap pushed to the next sweep, finally puts 👀 on the post that
+  asked for it instead of leaving that post silent about a review that
+  happened. A backlog row written before this was recorded carries no post and
+  reacts to nothing, as before. Either way the message is still finished off:
+  the sweep that decides its last pull request adds the result reaction,
+  whichever path decided it.
 
 Reactions are cosmetic, and firstpass treats them that way. A failed reaction
 — a missing OAuth scope, a deleted message, a network blip — is logged and
@@ -164,9 +183,9 @@ The chat script needs two more subcommands for this, `add-reaction
 and are logged, and reviews carry on exactly as before.
 
 Decisions and outcomes are recorded in a local `bbolt` database, so restarts
-and crashes never cause a PR to be reviewed twice for the same commit. Which PRs each chat message
-carried is recorded there too, because the result reaction can be hours behind
-the post that triggered it.
+and crashes never cause a PR to be reviewed twice for the same commit. Which
+PRs each chat message carried is recorded there too, because the result
+reaction can be hours behind the post that triggered it.
 
 ## Prerequisites
 

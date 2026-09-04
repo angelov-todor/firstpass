@@ -1089,8 +1089,18 @@ func TestAPauseArrivingMidSweepStopsTheResultReaction(t *testing.T) {
 	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := emojis(rc); len(got) != 2 || got[1] != EmojiClean {
-		t.Errorf("emojis = %v, want [👀 ✅] after the resume", got)
+	if got := emojisOn(rc, "spaces/A/messages/m1"); len(got) != 2 || got[1] != EmojiClean {
+		t.Errorf("emojis on m1 = %v, want [👀 ✅] after the resume", got)
+	}
+	// m2 gets its own pair, and that is new. Its pull request was parked by
+	// the pause and came back from the pending bucket on this sweep, which
+	// used to strip the trigger message -- so firstpass reviewed a pull
+	// request and the post that carried it showed nothing at all. Pending
+	// rows keep their provenance now, so the post is picked up and settled
+	// like any other.
+	if got := emojisOn(rc, "spaces/A/messages/m2"); len(got) != 2 || got[1] != EmojiClean {
+		t.Errorf("emojis on m2 = %v, want [👀 ✅]: its pull request was reviewed off the "+
+			"backlog, and a reviewed post must not be left silent", got)
 	}
 }
 

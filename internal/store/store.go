@@ -172,6 +172,29 @@ type Pending struct {
 	LastAttempt time.Time `json:"last_attempt"`
 	LastReason  string    `json:"last_reason"`
 
+	// TriggerMessage is the chat message that offered this pull request, and
+	// TriggerTime is when it was posted. They are the provenance of the park,
+	// restored onto the candidate when the ref is re-offered from this bucket.
+	//
+	// Without them a deferred ref came back anonymous. That was survivable
+	// while a review was a once-per-pull-request decision, but a second pass
+	// asks "did a post ask for this, and did that post come after the last
+	// review" -- so an anonymous ref could never be one. A re-post deferred by
+	// a transient gh failure, a draft, a pause or simply the per-sweep cap was
+	// therefore lost for good, and its pending row could never be retired
+	// either, because the record gate's skip returns above expirePending: it
+	// sat in `firstpass status` for ever.
+	//
+	// A row written before these fields existed decodes with neither, which
+	// reads as "no post is known to have asked for this" -- the same as the
+	// paths that genuinely have no message behind them, and the safe answer
+	// for both.
+	//
+	// No omitempty on TriggerTime: it is inert on a struct type, so the
+	// encoder emits the zero time either way. See LastPausedAt below.
+	TriggerMessage string    `json:"trigger_message,omitempty"`
+	TriggerTime    time.Time `json:"trigger_time"`
+
 	// LastPausedAt is when this entry was last observed during a paused sweep,
 	// zero when the entry is not currently parked by a pause.
 	//

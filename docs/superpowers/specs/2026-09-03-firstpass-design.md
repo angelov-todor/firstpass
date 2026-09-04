@@ -52,7 +52,7 @@ Out of scope:
 | Review engine | `claude -p "/code-review --comment"` | Reuses the repo's `CLAUDE.md`, the `dotnet-techne-code-review` skill, the sonarqube MCP, and `/code-review`'s existing inline-comment posting. Go builds no prompt and touches no GitHub comment API. |
 | Checkout | Bare mirror cache plus a throwaway worktree per PR | Never touches the user's working copies in `example-org/`, so a background review cannot disturb an active branch or uncommitted work. |
 | Scope | Every posted PR except ones the user authored | Matches how the space is used. `github_login: angelov-todor`. |
-| Dedupe | Once per commit, on a re-post | The team re-posts when an approval lapses or when they have pushed fixes, so re-posting is the intended re-trigger — but a re-post of the same commit must not earn a second comment set on lines that already carry one. Three conditions, all required: the record's outcome is `reviewed` **and** names the commit it reviewed; the re-post is a different, non-empty chat message; and the live head SHA differs from the recorded one. `needs_attention` is deliberately excluded — it means a review died mid-post, so comments may be half posted and an automatic retry risks duplicating them; a re-post is not consent to that, `firstpass replay` is. Every skipped outcome is excluded because nothing was ever reviewed, and a reviewed row with no head SHA is excluded because condition 3 cannot be established from a missing field. |
+| Dedupe | Once per commit, on a re-post | The team re-posts when an approval lapses or when they have pushed fixes, so re-posting is the intended re-trigger — but a re-post of the same commit must not earn a second comment set on lines that already carry one. Three conditions, all required: the record's outcome is `reviewed` **and** names the commit it reviewed and when it was decided; the re-post is a different, non-empty chat message **posted after that review finished** (a name comparison alone is not enough — a watermark gap and a `-backfill` both re-offer *older* posts, and the sweep takes the oldest message carrying a link while the record holds the newest, so an ordinary push nobody re-posted would manufacture a review); and the live head SHA is not any commit a pass has already reviewed, tracked as a set in `ReviewedSHAs` because a head force-pushed back to an earlier reviewed commit differs from the last one and must still be refused. `needs_attention` is deliberately excluded — it means a review died mid-post, so comments may be half posted and an automatic retry risks duplicating them; a re-post is not consent to that, `firstpass replay` is. Every skipped outcome is excluded because nothing was ever reviewed, and a reviewed row with no head SHA is excluded because condition 3 cannot be established from a missing field. |
 | Output | Inline GitHub PR comments | The user's explicit choice, made against a recommendation of local-only. Mitigated by a dry-run default, not by narrowing the choice. |
 | Verdict | An explicit GitHub review on every successfully reviewed PR, decided by the reviewer in one `FIRSTPASS-VERDICT:` line and submitted by firstpass | `/code-review --comment` posts findings and nothing else, so a clean PR produced complete silence — indistinguishable from the tool never having run. It happened for real on a +9/−0 one-file PR. The reviewer decides because firstpass never sees a finding; firstpass submits because that makes the action recorded in the store, visible in `status`, and testable against `runner.Fake` rather than buried in a prompt. |
 | Verdict asymmetry | `approve` for nothing-needing-change; a **COMMENT** review, never request-changes, for anything Critical or Important | An approval clears `reviewDecision`, which takes the PR out of the team's human review queue — acceptable only when there is nothing to change. A comment leaves `reviewDecision` at `REVIEW_REQUIRED`, so a PR with findings stays in the queue and a human still looks. request-changes was rejected outright: it would block a merge and speak for a human who has not read the code yet. |
@@ -118,8 +118,11 @@ interface with a fake, so `pipeline` tests run without subprocesses.
    every sweep while it sits in the fetch window, and nothing else about the record changes. Being
    above the state gate is deliberate — a PR re-posted after it was merged then keeps its
    `reviewed` record and the verdict on it, rather than having them overwritten with
-   `skipped_state`. The cost of the whole feature is this one `gh pr view` per re-post that turns
-   out to have nothing new in it.
+   `skipped_state`. The cost is one `gh pr view` per *qualifying* re-post — every re-post past
+   conditions 1 and 2, not only the ones that turn out to have nothing new: a re-post of a PR that
+   has since been merged, drafted or reassigned pays it as well, and those skip without advancing
+   the recorded trigger, so each later re-post or re-scan of the same post pays it again. All reads;
+   no new write.
 
    The gates *below* the fall-through were written without an existing review record in mind, and
    three of them record a terminal outcome: the state gate, the author gate, and pending expiry.
@@ -181,7 +184,12 @@ interface with a fake, so `pipeline` tests run without subprocesses.
   overwritten. Both were added after the tool was in production, so a pre-existing row carries
   neither: it decodes as pass 0 on the wire and is read through `Review.PassNumber`, which reports
   the first pass it was. "Pass 0" is a state no code ever means.
-- `pending` — `owner/repo#n` -> `{firstSeen, attempts, lastAttempt, lastReason}`.
+- `pending` — `owner/repo#n` -> `{firstSeen, attempts, lastAttempt, lastReason, lastPausedAt,
+  triggerMessage, triggerTime}`. The last two are the park's provenance, restored onto the candidate
+  when the ref is re-offered: without them a deferred ref came back anonymous, so a re-post the
+  per-sweep cap or a transient `gh` failure had parked could never satisfy the dedupe's second
+  condition and was lost for good — and its row could never be retired either, because the record
+  gate's skip returns above `expirePending`.
 - `messages` — `spaces/.../messages/...` -> `{name, refKeys, firstSeen, watchApplied, watchReaction,
   resultApplied, resultReaction}`. Never pruned, deliberately: there is no delete method at all.
   The bucket grows one small row per chat message that carried a PR link, beside the `reviews`
@@ -288,8 +296,13 @@ will happily let rot:
 5. **Reaction state is strictly additional.** Its own bucket, its own key; no reaction path ever
    writes a `Review`.
 
-A PR re-offered from `pending` carries no trigger message, and a `replay`'s trigger is the literal
-`"replay"`, so neither can add a 👀 — there is no message name to use. They can still finish a
+A `replay`'s trigger is the literal `"replay"` and identifies no chat message, so it can add no 👀.
+A PR re-offered from `pending` now can: the pending row records the message that offered it and its
+post time (`TriggerMessage`, `TriggerTime`), restored onto the candidate when the ref comes back, so
+a draft that becomes ready a day later or a review the per-sweep cap pushed to the next sweep is
+attributed to the post that asked for it. Before that, firstpass could review a pull request and
+leave the post that carried it showing nothing at all. A row written before those fields existed
+carries no message and reacts to nothing, as a `replay` still does. Either path can still finish a
 message off, which is why an end-of-sweep pass over the `messages` bucket offers a result reaction
 to every message still waiting on one, rather than relying on the candidate that happened to
 finish last.

@@ -122,6 +122,14 @@ Roughly eighteen further minor findings (regex breadth, structural duplication, 
 struct-tag inconsistencies, and test-or-report-only issues) were triaged as safe to leave
 indefinitely.
 
+One of those unlisted minor findings — **`TriggerMessage` is lost for pending-derived candidates**,
+never itemised above — is **FIXED** on the `second-pass` branch. `store.Pending` now carries
+`TriggerMessage` and `TriggerTime`, and `candidates` restores both onto a ref re-offered from the
+bucket. It stopped being minor when the second pass arrived: a re-post deferred by a transient `gh`
+failure, a draft, a pause or the per-sweep cap came back anonymous, so the re-post was lost for
+good and its pending row could never be retired either. A reviewed pull request whose post showed
+no reaction at all was the same defect wearing its cosmetic face.
+
 ## Process note
 
 The per-task review loop worked: code quality inside each package is high and the fix rounds
