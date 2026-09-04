@@ -35,9 +35,73 @@ One sweep, on a ticker or on demand:
    take it out. Every verdict body says in its first sentence that it is
    machine-written. A dry run submits nothing and its report says what the
    verdict would have been.
+8. Live, the chat message that carried the link gets a reaction, so the team
+   can see the PR has been picked up and, later, how it came out.
+
+## Chat reactions
+
+Live only, a message that carried a PR link is reacted to:
+
+- 👀 as soon as the first pull request from that message starts being
+  reviewed.
+- ✅ or 💬 once **every** pull request that message carried has reached a
+  terminal outcome, at which point the 👀 is removed.
+
+✅ means every pull request that message carried **and that firstpass actually
+reviewed** came back with an **approve** verdict — the same verdict that
+submits an approving GitHub review. 💬 means at least one of them wants a
+human's eye: findings were raised, or the reviewer printed no verdict firstpass
+recognised, or the verdict could not be submitted, or the review did not
+finish. firstpass never reads ✅ into silence, so anything it does not know
+counts as 💬.
+
+Pull requests firstpass **skipped** are excluded from that decision. A skip is
+not a finding — nothing was wrong with the code, firstpass simply had no
+business reviewing it — so a message carrying one clean review and one merged
+or out-of-org link still gets ✅.
+
+The reaction belongs to the **chat message, not the pull request**. One post
+routinely carries several links and reviews run strictly one at a time, so a
+per-PR reaction would say nothing a reader could act on: the useful statement
+is "this post has been picked up" and then "this post is done with".
+
+Three consequences worth knowing:
+
+- **A sibling PR that is not ready holds the result reaction back.** The
+  result belongs to the message, so it waits until *every* link on that
+  message is finished. A draft posted alongside a reviewable PR is deferred,
+  not decided, and keeps being retried until it is marked ready or its backlog
+  entry expires — up to `pending_max_age`, a week by default. Until then the
+  message keeps 👀 even though the PRs firstpass could review are all done.
+  That is deliberate: one result reaction per message is the whole point, and
+  reacting before the message is finished would mean reacting twice. But it is
+  the state you are most likely to see and misread, so `firstpass status` is
+  the place to look — the draft will be sitting in the deferred list.
+- A message whose every link was skipped — owner not on `allow_owners`, a
+  denied repo, merged, closed, a draft, your own PR — gets **no reaction at
+  all**. Nothing was reviewed, so there is nothing to report, and a bare ✅
+  would be the first the team heard of it.
+- `firstpass replay` and PRs re-offered from the backlog react to nothing on
+  the way in. Neither identifies a chat message. They do still finish a
+  message off: the sweep that decides a message's last pull request adds its
+  result reaction, whichever path decided it.
+
+Reactions are cosmetic, and firstpass treats them that way. A failed reaction
+— a missing OAuth scope, a deleted message, a network blip — is logged and
+nothing more: it never changes a review's outcome, never defers a PR, never
+affects the verdict submitted on it, and never stops the next review.
+`dry_run` reacts to nothing, `-print-only` reacts to nothing, and a `PAUSE`
+file stops reactions along with everything else outward-facing.
+
+The chat script needs two more subcommands for this, `add-reaction
+<message-name> <emoji>` and `remove-reaction <reaction-name>`; see
+`internal/chat` for the expected output shape. Without them, reactions fail
+and are logged, and reviews carry on exactly as before.
 
 Decisions and outcomes are recorded in a local `bbolt` database, so restarts
-and crashes never cause a PR to be reviewed twice.
+and crashes never cause a PR to be reviewed twice. Which PRs each chat message
+carried is recorded there too, because the result reaction can be hours behind
+the post that triggered it.
 
 ## Prerequisites
 
@@ -46,11 +110,14 @@ and crashes never cause a PR to be reviewed twice.
 - [`claude`](https://claude.com/product/claude-code) on `PATH`.
 - `git` on `PATH`.
 - A script that can read your Google Chat space and print its messages as
-  JSON on stdout. **firstpass does not talk to the Google Chat API
-  directly** — it drives this script as a subprocess, the same way it drives
-  `git` and `gh`. No such script is included in this repository; you need to
-  supply or write one yourself (see `internal/chat` for the expected output
-  shape).
+  JSON on stdout, and add and remove reactions on a message.
+  **firstpass does not talk to the Google Chat API directly** — it drives
+  this script as a subprocess, the same way it drives `git` and `gh`. No such
+  script is included in this repository; you need to supply or write one
+  yourself (see `internal/chat` for the expected subcommands and output
+  shapes). Reactions need an OAuth scope covering
+  `spaces.messages.reactions`; `https://www.googleapis.com/auth/chat.messages`
+  covers it.
 
 ## Install and configure
 
@@ -90,7 +157,10 @@ Read this before running anything other than `doctor` or `scan -print-only`.
 
 - **`dry_run: true` is the default.** Passing `-live`, or setting
   `dry_run: false` in the config, is what makes firstpass post real comments
-  to real pull requests, under your GitHub identity.
+  to real pull requests, under your GitHub identity — and what makes it react
+  to real chat messages, under your Google identity. `dry_run` is an absolute
+  "no outward effect" switch: a dry run does not react, does not submit
+  a verdict, and does not even record the state a reaction would need.
 - **A clean PR is approved under your own GitHub identity.** Live, a
   successful review always ends in a submitted GitHub review: an approval when
   the reviewer raised nothing or only nits, a comment review when it raised

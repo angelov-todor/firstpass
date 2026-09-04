@@ -21,6 +21,8 @@ In scope:
 - Post findings as inline comments on the PR, under the user's own GitHub identity.
 - Submit an explicit review verdict on every successfully reviewed PR, so a clean one is never
   silent: an approval when nothing needs changing, a comment review when something does.
+- React to the chat message that carried the link, so the team can see the PR has been picked up
+  and, later, that it is done with.
 
 Out of scope:
 
@@ -47,6 +49,8 @@ Out of scope:
 | Verdict asymmetry | `approve` for nothing-needing-change; a **COMMENT** review, never request-changes, for anything Critical or Important | An approval clears `reviewDecision`, which takes the PR out of the team's human review queue — acceptable only when there is nothing to change. A comment leaves `reviewDecision` at `REVIEW_REQUIRED`, so a PR with findings stays in the queue and a human still looks. request-changes was rejected outright: it would block a merge and speak for a human who has not read the code yet. |
 | Verdict on a failure | Nothing submitted | A failed, killed or timed-out review may have posted a partial comment set and reached no conclusion; a verdict on top of that would state one it never reached. Those stay `needs_attention`. A verdict submission that *itself* fails is the opposite case — the review completed and its comments are all posted — so it stays `reviewed`, with the error in `Detail` and no automatic retry. |
 | Topology | One long-running process, serial review worker | The work is genuinely serial, and concurrent `claude` processes on a laptop are undesirable. The `scan` subcommand makes Task Scheduler operation available without further work. |
+| Progress signal | A reaction on the chat message | The team posts a link and otherwise sees nothing until comments appear on the PR, which can be half an hour later. A reaction needs no new message in the space and no new surface to read. |
+| Reaction granularity | Per chat **message**, not per pull request | One post routinely carries several links and reviews run serially, so per-PR reactions would accumulate on one message in an order nobody can read. The useful statements are "this post has been picked up" and "this post is done with". |
 
 ### Risk accepted deliberately
 
@@ -72,10 +76,10 @@ Single Go module, one binary:
 
 | Package | Responsibility | Interface |
 |---|---|---|
-| `internal/chat` | Read the space | `Fetch(ctx, Watermark) ([]Message, error)` |
+| `internal/chat` | Read the space, react to a message | `Fetch(ctx, Watermark) ([]Message, error)`, `AddReaction`, `RemoveReaction` |
 | `internal/prref` | Extract PR refs from message text | `Extract(text string) []PRRef` — pure |
 | `internal/ghpr` | Query PR metadata; submit the verdict | `Inspect(ctx, PRRef) (PRInfo, error)`, `SubmitReview(ctx, PRRef, verdict, body) error` |
-| `internal/store` | Persist watermark and outcomes | `Reviewed`, `Record`, `Pending`, watermark get / set |
+| `internal/store` | Persist watermark, outcomes and message reaction state | `Reviewed`, `Record`, `Pending`, `Message`, watermark get / set |
 | `internal/worktree` | Provide code on disk | `Prepare(ctx, PRRef, sha) (dir, cleanup, error)` |
 | `internal/review` | Run the reviewer | `Run(ctx, dir, PRRef) (Result, error)` |
 | `internal/pipeline` | Orchestrate one sweep | `Sweep(ctx) (SweepReport, error)` |
@@ -117,7 +121,7 @@ interface with a fake, so `pipeline` tests run without subprocesses.
 
 ## State
 
-`bbolt` at `%LOCALAPPDATA%\firstpass\state.db`, three buckets:
+`bbolt` at `%LOCALAPPDATA%\firstpass\state.db`, four buckets:
 
 - `meta` — `watermark` -> `{messageName, createTime}`. The key is the message **name**
   (`spaces/.../messages/...`), which is stable and unique. `createTime` has ties and clock skew, so
@@ -125,6 +129,18 @@ interface with a fake, so `pipeline` tests run without subprocesses.
 - `reviews` — `owner/repo#n` -> outcome, submitted verdict, head SHA, triggering message, duration, exit code, report
   path.
 - `pending` — `owner/repo#n` -> `{firstSeen, attempts, lastAttempt, lastReason}`.
+- `messages` — `spaces/.../messages/...` -> `{name, refKeys, firstSeen, watchApplied, watchReaction,
+  resultApplied, resultReaction}`. Never pruned, deliberately: there is no delete method at all.
+  The bucket grows one small row per chat message that carried a PR link, beside the `reviews`
+  bucket's one row per PR, and pruning settled rows would discard the very state that stops a
+  message being reacted to twice. Added after the tool was already in production, so it is created
+  by `CreateBucketIfNotExists` alongside the other three and an existing database simply gains it.
+
+  This bucket exists because the reaction is per message: the result reaction is only correct once
+  every PR that message carried is terminal, which can be days later, after the message has left the
+  fetch window and after any number of restarts. Nothing in it is ever read to decide whether a PR
+  gets reviewed — the `reviews` bucket alone decides that — so a message record that is missing,
+  stale or unwritable costs a reaction and nothing else.
 
 ### Terminal versus deferred outcomes
 
@@ -159,6 +175,72 @@ midway through posting. So a timeout is `needs_attention` too, never a retry. Th
 `review_timeout` is generous (30m, raised from 20m after a real review took 12m15s) — a timeout is a manual-intervention event, so it should only
 fire when something is genuinely stuck.
 
+### Chat reactions
+
+Live only. 👀 goes on immediately before the first `Rev.Run` for a PR that message carried — the
+first moment "this is being reviewed" is true, and the last moment it is still useful to say. Once
+every PR that message carried has a terminal review record, the result reaction goes on and the 👀
+comes off.
+
+**The result is decided by the verdict, not by the outcome.** ✅ means every PR this message
+carried **that firstpass reviewed** was recorded `store.VerdictApproved` — the verdict that
+submitted an approving GitHub review. Everything else is 💬. The verdict is the only signal that
+distinguishes clean from not: the findings are inline comments on the pull request and the pipeline
+never sees one, so an outcome-based rule would call a PR with twenty comments on it clean, purely
+because the review process completed.
+
+Two asymmetries are deliberate:
+
+- **PRs firstpass never reviewed are left out of the decision.** Skipped for the owner, the deny
+  list, the state, the author, or retired by pending expiry: a skip is not a finding — nothing was
+  wrong with the code, firstpass simply had no business reviewing it. A message carrying one
+  approved review and one merged link is clean, and gets ✅.
+- **Everything short of an outright approval is 💬.** `store.VerdictApproved` is only ever set when
+  a submission actually succeeded, so a findings verdict, a reviewer that printed no verdict line,
+  a submission that failed, and a review that did not finish at all are all "firstpass does not
+  know that this is clean" — and not knowing is never rendered as ✅. A misleading tick on a PR
+  with comments waiting is worse than no reaction, so an unrecognised outcome takes the pessimistic
+  reading too.
+
+The rules. Each is pinned by a test that was checked to fail when its own guard
+is reverted — including the ones that read as belt and braces, because those are the ones a suite
+will happily let rot:
+
+1. **Nothing that was not reviewed is reacted to.** `watchApplied` is the "a review actually
+   started" flag, and no `watchApplied` means no result reaction either — so a message whose every
+   link was skipped for its owner, the deny list, its state, its author, being a draft, the
+   per-sweep cap, a pause or print-only gets no reaction at all. `settleMessageReaction` says it
+   again independently: if, after excluding the skips, no ref was reviewed, it reacts to nothing.
+   The two can disagree, because the ref list is re-read from the message text every sweep and a
+   chat message edited after its review started ends up carrying a 👀 and a ref list holding
+   nothing firstpass reviewed. Without the second check the ref loop is vacuous and the message
+   earns a bare ✅ for work firstpass never did.
+2. **Never twice for the same stage.** Each stage is recorded in the store *before* the API call,
+   the same discipline as writing a review record as `in_flight` before `claude` starts: an
+   outward act that might be repeated is worse than one that is occasionally missed, and a reaction
+   is cosmetic either way. A backfill or a watermark gap re-offering the message changes nothing.
+
+   What that trades away is a reaction lost to a transient failure — so the one transient failure
+   that is not rare is caught before the latch. **An already-cancelled context reacts to nothing.**
+   Ctrl-C during a review is how the daemon is normally stopped and a review runs for up to thirty
+   minutes, so a dead context by the time a reaction is attempted is routine. The call cannot
+   succeed on one, so latching first would turn a transient interrupt into a permanent one: the
+   message would keep 👀 for good, never get its result, and never be looked at again, because the
+   latch says it is finished. `Sweep` guards its own end-of-sweep pass the same way; both inline
+   calls from `handle` do too, and a later healthy sweep picks the work up.
+3. **A reaction failure never touches a review.** It is logged and dropped: no `needs_attention`, no
+   pending entry, no held watermark, and the next review runs exactly as before.
+4. **`dry_run` and `-print-only` react to nothing**, and record no reaction state either. A `PAUSE`
+   file stops reactions with everything else outward-facing, deferring rather than dropping them.
+5. **Reaction state is strictly additional.** Its own bucket, its own key; no reaction path ever
+   writes a `Review`.
+
+A PR re-offered from `pending` carries no trigger message, and a `replay`'s trigger is the literal
+`"replay"`, so neither can add a 👀 — there is no message name to use. They can still finish a
+message off, which is why an end-of-sweep pass over the `messages` bucket offers a result reaction
+to every message still waiting on one, rather than relying on the candidate that happened to
+finish last.
+
 ## Safety controls
 
 1. **`dry_run: true` in the shipped config.** Runs `/code-review` without `--comment` and writes
@@ -179,6 +261,10 @@ fire when something is genuinely stuck.
    post review comments on it. The allowlist makes the default blast radius the team's own org.
 6. **`deny_repos`.** Never acted on; recorded terminal. For carving specific repos out of an
    otherwise allowed owner.
+7. **Reactions are cosmetic by construction.** One gate (`reactionsEnabled`) refuses in a dry run,
+   in print-only mode, and when no reactor is wired; `cmd` additionally wires no reactor in a dry
+   run. Every reaction failure is logged and dropped — it cannot change an outcome, defer a PR, or
+   alter the verdict submitted on one.
 
 ## Configuration
 
@@ -232,13 +318,14 @@ Test-driven throughout. The decision logic is I/O-free, so most tests need no su
   would require guessing a repo.
 - **`chat`** — golden files of real `get-messages` output, including one fixture carrying the
   `Access token expired, refreshing...` prefix ahead of the JSON.
-- **`pipeline`** — fakes for `chat`, `ghpr` and `review`. Covers the full decision table: skip own,
+- **`pipeline`** — fakes for `chat`, `ghpr`, `review` and the chat reactor. Covers the full decision table: skip own,
   draft to `pending`, merged terminal, owner not in `allow_owners`, in-batch dedupe, per-sweep cap,
   `PAUSE` file (including that it does not increment `attempts`), cold start reviewing nothing,
   timeout landing on `needs_attention` rather than retrying, and the watermark advancing only after
   a fully recorded batch.
 - **`store`** — real bbolt in a temp dir, reopened mid-test to prove `in_flight` and the watermark
-  survive a restart.
+  survive a restart, and a fixture database built with only the original three buckets to prove a
+  pre-existing database gains `messages` and keeps its records.
 - **`worktree`** — real git against a fixture repo built in a temp dir; behind `-short`.
 - **Manual smoke** — `scan --print-only --backfill 200` against the real space.
 
@@ -260,6 +347,9 @@ Slices 1 to 3 hold most of the logic and cannot write anywhere.
 
 - A PR posted to `[AstraEx] Team` by another team member receives inline review comments within one
   poll interval, with no manual step.
+- That post carries 👀 while its PRs are being reviewed, and exactly one result reaction once they
+  are all finished: ✅ only if every PR on it that firstpass reviewed was approved. A post whose
+  PRs were all skipped carries neither reaction.
 - The user's own PRs, drafts, and merged or closed PRs receive no comments.
 - No PR receives duplicate comment sets, including across daemon restarts and crashes.
 - A first run against a populated space reviews nothing.

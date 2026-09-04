@@ -104,10 +104,23 @@ type fakeRev struct {
 	// non-zero (a real exit status) separately from claude being killed
 	// (no exit status at all).
 	result review.Result
+	// onRun runs after the review is recorded as having happened, where a
+	// Ctrl-C arriving as claude finishes would land.
+	onRun func()
 }
 
-func (f *fakeRev) Run(_ context.Context, _ string, ref prref.PRRef) (review.Result, error) {
+func (f *fakeRev) Run(ctx context.Context, _ string, ref prref.PRRef) (review.Result, error) {
 	f.ran = append(f.ran, ref.Key())
+	// A cancelled context is an error, never a clean run: runner.OS returns
+	// ctx.Err() ahead of any exit status precisely so a review killed by a
+	// Ctrl-C or a deadline cannot be mistaken for one that finished.
+	if err := ctx.Err(); err != nil {
+		return f.result, err
+	}
+	// After the review, where a Ctrl-C arriving as claude finishes would land.
+	if f.onRun != nil {
+		f.onRun()
+	}
 	return f.result, f.err
 }
 
@@ -121,6 +134,10 @@ type harness struct {
 	wts *fakeWTs
 	rev *fakeRev
 	cfg config.Config
+
+	// reactLog is the interleaved log of reaction and review calls. Only
+	// reactHarness sets it; see reactions_test.go.
+	reactLog *[]string
 }
 
 func newHarness(t *testing.T, msgs []chat.Message) *harness {

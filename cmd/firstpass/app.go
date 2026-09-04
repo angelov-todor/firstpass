@@ -58,16 +58,24 @@ func openApp(configPath string, live bool, withReview bool) (*app, error) {
 	log := newLogger()
 	r := runner.OS{}
 
+	cc := chat.New(r, cfg.Paths.Python, cfg.Paths.ChatScript, cfg.Space)
 	p := &pipeline.Pipeline{
 		Cfg:   cfg,
 		Store: st,
-		Chat:  chat.New(r, cfg.Paths.Python, cfg.Paths.ChatScript, cfg.Space),
+		Chat:  cc,
 		PRs:   ghpr.New(r, cfg.Paths.GH),
 		Log:   log,
 	}
 	if withReview {
 		p.WTs = worktree.New(r, cfg.Paths.Git, cfg.ReposDir(), cfg.WorkDir())
 		p.Rev = review.New(r, cfg.Paths.Claude, cfg.ClaudeArgs, cfg.DryRun, cfg.ReportsDir())
+	}
+	// Reactions are outward-facing, so a dry run gets no reactor at all. The
+	// pipeline refuses to react in a dry run on its own account too; two
+	// independent guards, because dry_run is the switch the operator trusts
+	// with "this cannot touch anybody else's chat or pull request".
+	if withReview && !cfg.DryRun {
+		p.React = cc
 	}
 
 	return &app{cfg: cfg, store: st, log: log, pipe: p}, nil
