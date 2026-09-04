@@ -513,10 +513,13 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	//
 	//   - expirePending must not run during a pause. It sits below this gate.
 	//   - the expiry clock must not run during a pause either. holdPaused
-	//     advances FirstSeen, so the paused time is excluded from the age
-	//     rather than merely deferred to the first sweep after `firstpass
-	//     resume` -- which is what a pause longer than PendingMaxAge used to
-	//     do to every parked ref at once.
+	//     shifts FirstSeen forward by the paused interval as it accrues, so
+	//     the paused time -- and only the paused time -- is excluded from the
+	//     age, rather than the expiry merely being deferred to the first sweep
+	//     after `firstpass resume`, which is what a pause longer than
+	//     PendingMaxAge used to do to every parked ref at once. Pre-pause age
+	//     survives: a ref that had waited six days before the pause has still
+	//     waited six days after it.
 	if rep.Paused || rep.pausedMidSweep {
 		note(p.holdPaused(ref, "paused", opts))
 		return dec(ActionDefer, "paused")
@@ -764,11 +767,29 @@ func (p *Pipeline) hold(ref prref.PRRef, reason string, opts Options) error {
 }
 
 // holdPaused parks a ref during a pause, and is the only caller that stops the
-// expiry clock. Advancing FirstSeen to now excludes the paused interval from
-// the age expirePending measures, so a pause longer than PendingMaxAge cannot
-// void the backlog on the first sweep after `firstpass resume`. Nothing else
-// may do this: refreshing FirstSeen on every hold would disable age-based
-// expiry outright.
+// expiry clock.
+//
+// It stops the clock; it does not restart it. The first paused sighting only
+// records LastPausedAt -- nothing has been paused yet, so there is nothing to
+// credit -- and every later paused sweep shifts FirstSeen forward by the
+// interval since the previous paused sighting. The age expirePending measures
+// is therefore real time minus paused time, and nothing else: a ref that had
+// already waited six days before the pause has still waited six days after it.
+//
+// Setting FirstSeen to now instead, as this used to, discards all pre-pause
+// age rather than only the paused interval. That disables age-based expiry
+// outright for an operator who pauses regularly, and makes a ref already past
+// PendingMaxAge un-expirable if a pause lands before the sweep that would have
+// retired it.
+//
+// Up to one sweep interval of paused time goes unaccounted, between the final
+// paused sweep and the resume. That is deliberate and conservative: it
+// under-credits the pause by minutes against a week-long budget, erring
+// towards retiring a stale entry rather than keeping it forever.
+//
+// Nothing else may stop the clock: every other park clears LastPausedAt, since
+// leaving it set would credit the pause with the unpaused time since the
+// resume.
 func (p *Pipeline) holdPaused(ref prref.PRRef, reason string, opts Options) error {
 	return p.upsertPending(ref, reason, false, true, opts)
 }
@@ -781,7 +802,12 @@ func (p *Pipeline) deferAttempt(ref prref.PRRef, reason string, opts Options) er
 // upsertPending writes nothing in print-only mode, so a dry run cannot burn
 // attempt budget or otherwise leave a mark on the store, and nothing for a
 // replay, so an explicit one-off never queues itself for the automatic path.
-func (p *Pipeline) upsertPending(ref prref.PRRef, reason string, countAttempt, restartClock bool, opts Options) error {
+//
+// paused says whether this park is a pause. It is the only input that touches
+// the expiry clock, and only ever by shifting FirstSeen forward by paused time
+// as that time accrues; see holdPaused for why, and why every other park
+// clears LastPausedAt instead.
+func (p *Pipeline) upsertPending(ref prref.PRRef, reason string, countAttempt, paused bool, opts Options) error {
 	if opts.PrintOnly || opts.replay {
 		return nil
 	}
@@ -790,14 +816,26 @@ func (p *Pipeline) upsertPending(ref prref.PRRef, reason string, countAttempt, r
 		p.Log.Error("read pending", "key", ref.Key(), "err", err)
 		return err
 	}
+	now := p.now()
 	if !ok {
-		pd = store.Pending{Key: ref.Key(), FirstSeen: p.now()}
-	} else if restartClock {
-		pd.FirstSeen = p.now()
+		pd = store.Pending{Key: ref.Key(), FirstSeen: now}
+	}
+	switch {
+	case !paused:
+		// The clock runs again from here. A row written before LastPausedAt
+		// existed decodes as zero, so this is also a no-op for it.
+		pd.LastPausedAt = time.Time{}
+	case pd.LastPausedAt.IsZero():
+		// First paused sighting: nothing has been paused yet, so FirstSeen is
+		// left exactly where it is.
+		pd.LastPausedAt = now
+	default:
+		pd.FirstSeen = pd.FirstSeen.Add(now.Sub(pd.LastPausedAt))
+		pd.LastPausedAt = now
 	}
 	if countAttempt {
 		pd.Attempts++
-		pd.LastAttempt = p.now()
+		pd.LastAttempt = now
 	}
 	pd.LastReason = reason
 	if err := p.Store.PutPending(pd); err != nil {

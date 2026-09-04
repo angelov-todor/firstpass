@@ -52,6 +52,16 @@ type Pending struct {
 	Attempts    int       `json:"attempts"`
 	LastAttempt time.Time `json:"last_attempt"`
 	LastReason  string    `json:"last_reason"`
+
+	// LastPausedAt is when this entry was last observed during a paused sweep,
+	// zero when the entry is not currently parked by a pause.
+	//
+	// It is how the pipeline stops the expiry clock during a pause without
+	// discarding the age accrued before it: each paused sweep shifts FirstSeen
+	// forward by the interval since the previous paused sighting, so only the
+	// paused time is excluded. A row written before this field existed decodes
+	// as zero, which is exactly right -- it was not parked by a pause.
+	LastPausedAt time.Time `json:"last_paused_at,omitempty"`
 }
 
 // Watermark is the newest chat message already processed. The message name is
