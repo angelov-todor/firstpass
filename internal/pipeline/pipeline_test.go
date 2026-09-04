@@ -121,6 +121,10 @@ type harness struct {
 	wts *fakeWTs
 	rev *fakeRev
 	cfg config.Config
+
+	// reactLog is the interleaved log of reaction and review calls. Only
+	// reactHarness sets it; see reactions_test.go.
+	reactLog *[]string
 }
 
 func newHarness(t *testing.T, msgs []chat.Message) *harness {

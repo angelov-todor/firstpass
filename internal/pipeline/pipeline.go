@@ -21,7 +21,7 @@ import (
 	"github.com/angelov-todor/firstpass/internal/store"
 )
 
-// The four seams to the outside world. Each has a fake in the tests, which is
+// The five seams to the outside world. Each has a fake in the tests, which is
 // why every rule below is verified without a subprocess.
 type (
 	ChatSource interface {
@@ -45,6 +45,13 @@ type (
 	}
 	Reviewer interface {
 		Run(ctx context.Context, dir string, ref prref.PRRef) (review.Result, error)
+	}
+	// Reactor puts reactions on chat messages, so the team can see that a
+	// posted pull request has been picked up. Everything it does is
+	// cosmetic: see reactions.go.
+	Reactor interface {
+		AddReaction(ctx context.Context, messageName, emoji string) (reactionName string, err error)
+		RemoveReaction(ctx context.Context, reactionName string) error
 	}
 )
 
@@ -204,6 +211,13 @@ type Pipeline struct {
 	Log   *slog.Logger
 	Now   func() time.Time
 
+	// React, when non-nil, puts 👀 on a chat message whose pull request is
+	// being reviewed and a result reaction on it once every pull request that
+	// message carried is finished. Left nil, nothing reacts and nothing else
+	// changes; reactionsEnabled is the single gate, and it also refuses in a
+	// dry run and in print-only mode.
+	React Reactor
+
 	// Progress, when non-nil, is called as a sweep proceeds so a caller can
 	// show the operator that a long review is working rather than wedged. It
 	// must not block; the CLI renders it. Left nil, nothing about progress
@@ -306,6 +320,11 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 		return rep, err
 	}
 
+	// Recorded before the candidate list is built, because the candidate list
+	// de-duplicates refs across messages and this has to be what each message
+	// itself carried.
+	p.recordMessages(msgs, opts)
+
 	cands := p.candidates(msgs)
 	p.progress(Event{Stage: StageCandidates, Total: len(cands)})
 
@@ -323,6 +342,15 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 	}
 
 	p.appendRecoveredDecisions(&rep)
+
+	// A message whose last pull request was finished by a candidate with no
+	// trigger -- one re-offered from pending, say -- has no other chance at
+	// its result reaction. Skipped while paused, because the kill switch stops
+	// everything outward-facing, and when interrupted, because the context is
+	// already cancelled and every call would only fail.
+	if !interrupted && !rep.Paused && !rep.pausedMidSweep {
+		p.settleOutstandingReactions(ctx, opts)
+	}
 
 	if interrupted {
 		p.progress(Event{Stage: StageSweepFinished, Detail: "interrupted"})
@@ -681,6 +709,12 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		return dec(ActionDefer, "could not record in_flight")
 	}
 
+	// The in_flight record is on disk and claude is about to start, so this is
+	// the first moment at which "this pull request is being reviewed" is true.
+	// It is also the last: everything below either runs the review or reports
+	// its result.
+	p.startMessageReaction(ctx, c.trigger, opts)
+
 	rctx, cancel := context.WithTimeout(ctx, p.Cfg.ReviewTimeout.D())
 	defer cancel()
 
@@ -750,6 +784,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 			note(err)
 		}
 		p.Log.Warn("needs attention", "key", ref.Key(), "err", rerr)
+		p.settleMessageReaction(ctx, c.trigger, opts)
 		p.progress(Event{
 			Stage: StageReviewFinished, Ref: ref, Index: idx, Total: total,
 			Detail: reviewFinishedDetail(string(rec.Outcome), done.Sub(started)),
@@ -773,6 +808,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	}
 	rep.Reviewed++
 	p.Log.Info("reviewed", "key", ref.Key(), "ms", rec.DurationMS, "report", rec.ReportPath)
+	p.settleMessageReaction(ctx, c.trigger, opts)
 	p.progress(Event{
 		Stage: StageReviewFinished, Ref: ref, Index: idx, Total: total,
 		Detail: reviewFinishedDetail(string(rec.Outcome), done.Sub(started)),
