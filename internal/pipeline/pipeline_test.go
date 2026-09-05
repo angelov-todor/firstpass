@@ -88,6 +88,9 @@ type fakeWTs struct {
 	prepared  []string
 	cleanedUp int
 	err       error
+	// errFor fails Prepare for named refs only, so a test can have one
+	// candidate in a batch fail its clone while the others succeed.
+	errFor map[string]error
 	// onPrepare runs where the real clone would: after every gate the sweep
 	// applies up front, and immediately before the review starts.
 	onPrepare func()
@@ -96,6 +99,9 @@ type fakeWTs struct {
 func (f *fakeWTs) Prepare(_ context.Context, ref prref.PRRef) (string, func(), error) {
 	if f.onPrepare != nil {
 		f.onPrepare()
+	}
+	if err, ok := f.errFor[ref.Key()]; ok {
+		return "", func() {}, err
 	}
 	if f.err != nil {
 		return "", func() {}, f.err

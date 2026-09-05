@@ -283,12 +283,11 @@ type SweepReport struct {
 	// field, so its meaning must not change.
 	Reviewed int
 
-	// reviewAttempts counts every Rev.Run invocation, successful or not, and
-	// is what the per-sweep cap actually bounds. Reviewed alone cannot bound
-	// it: a run of failures never increments Reviewed, so the cap would never
-	// trip while reviews are failing -- precisely when a throttle matters
-	// most, since a failed run may already have posted comments.
-	reviewAttempts int
+	// The attempt counter that the per-sweep cap bounds lives on sweepState,
+	// not here: it is claimed and released by candidates that may be running
+	// at the same time. Reviewed alone could never bound the cap anyway -- a
+	// run of failures never increments it, so the cap would not trip while
+	// reviews are failing, which is precisely when a throttle matters most.
 
 	// recordFailed is set when any store write for this batch failed. The
 	// spec advances the watermark only once the entire batch is recorded, so
@@ -477,6 +476,8 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 	cands := p.candidates(msgs)
 	p.progress(Event{Stage: StageCandidates, Total: len(cands)})
 
+	st := newSweepState(p.Cfg.MaxReviewsPerSweep)
+
 	interrupted := false
 	for i, c := range cands {
 		// Ctrl-C mid-sweep used to keep iterating: every remaining candidate
@@ -487,7 +488,19 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 			p.Log.Warn("sweep interrupted; holding the watermark", "err", ctx.Err())
 			break
 		}
-		rep.Decisions = append(rep.Decisions, p.handle(ctx, c, &rep, opts, i+1, len(cands)))
+		rep.Decisions = append(rep.Decisions, p.handle(ctx, c, &rep, st, opts, i+1, len(cands)))
+	}
+
+	// Fold the shared state back into the report. Everything below reads these
+	// fields -- the result-reaction pass checks pausedMidSweep, the watermark
+	// decision checks recordFailed -- so the fold has to happen before any of
+	// it, not at the end of the function.
+	rep.Reviewed = st.reviewedCount()
+	if st.recordDidFail() {
+		rep.recordFailed = true
+	}
+	if st.pausedMid() {
+		rep.pausedMidSweep = true
 	}
 
 	p.appendRecoveredDecisions(&rep)
@@ -668,7 +681,12 @@ func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
 // candidate list (1-based) and are carried on every progress event handle
 // emits, so a renderer can show "[12/70]" even though most candidates never
 // reach the later stages.
-func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, opts Options, idx, total int) Decision {
+// handle decides and acts on one candidate.
+//
+// rep is read-only here: its recovered map and Paused flag are both written
+// before any candidate runs. Everything handle needs to *write* lives in st,
+// because several candidates can be inside this function at once.
+func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st *sweepState, opts Options, idx, total int) Decision {
 	ref := c.ref
 	dec := func(a Action, reason string) Decision {
 		return Decision{Ref: ref, Action: a, Reason: reason}
@@ -677,7 +695,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// still stands, but the watermark must not move past the batch.
 	note := func(err error) {
 		if err != nil {
-			rep.recordFailed = true
+			st.noteRecordFailed()
 		}
 	}
 
@@ -776,7 +794,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	//     PendingMaxAge used to do to every parked ref at once. Pre-pause age
 	//     survives: a ref that had waited six days before the pause has still
 	//     waited six days after it.
-	if rep.Paused || rep.pausedMidSweep {
+	if rep.Paused || st.pausedMid() {
 		note(p.holdPaused(c, "paused", opts))
 		return dec(ActionDefer, "paused")
 	}
@@ -805,7 +823,10 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// The cap parks the ref without counting an attempt: hitting it is not a
 	// failure, and letting it burn attempts would expire a backlog over
 	// nothing but bad luck in scheduling.
-	if rep.reviewAttempts >= p.Cfg.MaxReviewsPerSweep {
+	// Advisory: it saves an Inspect call when the cap is plainly full. The
+	// authoritative claim is the reservation below, taken once this candidate
+	// is actually going to be reviewed.
+	if st.capReached() {
 		note(p.hold(c, "per-sweep cap reached", opts))
 		return dec(ActionDefer, "per-sweep cap reached")
 	}
@@ -879,6 +900,29 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		return dec(ActionWouldReview, reason)
 	}
 
+	// Claim a review slot before the clone, which is the first expensive step,
+	// so a candidate turned away by the cap costs nothing. Counted as an
+	// attempt rather than a success: this is what the per-sweep cap bounds, so
+	// a run of failures cannot make Rev.Run fire for every candidate in the
+	// batch.
+	//
+	// Held from here to Rev.Run and handed back on every path in between --
+	// a worktree that fails, a pause taking effect, an in_flight write that
+	// fails. A slot leaked on one of those would shrink the cap for the rest
+	// of the sweep, so the release is a defer keyed off one flag rather than a
+	// call on each path, which is the version that stays correct when a path
+	// is added later.
+	if !st.reserveReview() {
+		note(p.hold(c, "per-sweep cap reached", opts))
+		return dec(ActionDefer, "per-sweep cap reached")
+	}
+	reviewStarted := false
+	defer func() {
+		if !reviewStarted {
+			st.releaseReview()
+		}
+	}()
+
 	// A bare clone of a whole repository is the longest subprocess firstpass
 	// runs, and on Windows a credential prompt can stall it indefinitely.
 	p.progress(Event{Stage: StagePreparingWorktree, Ref: ref, Index: idx, Total: total})
@@ -897,7 +941,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	// pull requests has to take effect on the next review, not the next sweep.
 	// No attempt is counted: a pause is not a failure of this PR.
 	if p.paused() {
-		rep.pausedMidSweep = true
+		st.pauseMidSweep()
 		note(p.holdPaused(c, "paused after the worktree was prepared", opts))
 		return dec(ActionDefer, "paused before the review started")
 	}
@@ -969,10 +1013,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 	rctx, cancel := context.WithTimeout(ctx, p.Cfg.ReviewTimeout.D())
 	defer cancel()
 
-	// Counts every invocation, not just successes: this is what the per-sweep
-	// cap bounds, so a run of failures cannot make Rev.Run fire for every
-	// candidate in the batch.
-	rep.reviewAttempts++
+	reviewStarted = true
 	p.progress(Event{Stage: StageReviewStarted, Ref: ref, Index: idx, Total: total})
 	res, rerr := p.Rev.Run(rctx, dir, ref, prevPass)
 	done := p.now()
@@ -1057,7 +1098,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, op
 		p.Log.Error("delete pending", "key", ref.Key(), "err", err)
 		note(err)
 	}
-	rep.Reviewed++
+	st.noteReviewed()
 	p.Log.Info("reviewed", "key", ref.Key(), "ms", rec.DurationMS, "report", rec.ReportPath)
 	p.settleMessageReaction(ctx, c.trigger, opts)
 	p.progress(Event{
@@ -1202,7 +1243,8 @@ func (p *Pipeline) ReviewOne(ctx context.Context, ref prref.PRRef, opts Options)
 	// The per-sweep cap needs no adjustment: a replay starts with zero
 	// attempts and Validate forbids a cap of zero, so the gate cannot trip.
 	rep := SweepReport{}
-	return p.handle(ctx, candidate{ref: ref, trigger: "replay", previous: previous}, &rep, opts, 1, 1), nil
+	st := newSweepState(p.Cfg.MaxReviewsPerSweep)
+	return p.handle(ctx, candidate{ref: ref, trigger: "replay", previous: previous}, &rep, st, opts, 1, 1), nil
 }
 
 // terminal closes the book on a ref and clears any pending entry for it. In
