@@ -138,23 +138,86 @@ func TestDryRunWithNoOutputStillWritesAReportNamingTheFailure(t *testing.T) {
 	}
 }
 
-// A live run's findings live on the pull request, so a live failure must not
-// start writing reports.
-func TestLiveFailureWritesNoReport(t *testing.T) {
+// TestALiveFailureKeepsWhatItPrinted replaces TestLiveFailureWritesNoReport,
+// which asserted the opposite on the grounds that "a live run's findings live
+// on the pull request".
+//
+// That reasoning holds for a review that finished. It is exactly wrong for one
+// that did not: a killed or failed live review was posting comments one at a
+// time when it stopped, firstpass cannot tell how far it got, and the operator
+// is told as much -- "comments may be partially posted". Whatever the reviewer
+// had printed is the only evidence of how far it actually got, and throwing it
+// away leaves the operator to work that out by reading the pull request.
+func TestALiveFailureKeepsWhatItPrinted(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{ExitCode: 1, Stdout: []byte("half a review")}},
+		{Match: "code-review", Result: runner.Result{
+			ExitCode: 1,
+			Stdout:   []byte("half a review"),
+			Stderr:   []byte("usage limit reached"),
+		}},
 	}}
 	rr := New(f, "claude", nil, false, dir)
 
-	if _, err := rr.Run(context.Background(), "work", ref, nil); err == nil {
+	res, err := rr.Run(context.Background(), "work", ref, nil)
+	if err == nil {
 		t.Fatal("a non-zero exit must be an error")
 	}
-	entries, rerr := os.ReadDir(dir)
+	if res.ReportPath == "" {
+		t.Fatal("a live review that failed must keep what it printed: it is the only " +
+			"evidence of how many comments it managed to post")
+	}
+	body, rerr := os.ReadFile(res.ReportPath)
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
-	if len(entries) != 0 {
-		t.Errorf("no report files expected for a live run, found %d", len(entries))
+	got := string(body)
+	if !strings.Contains(got, "half a review") {
+		t.Errorf("the report must carry what the reviewer printed:\n%s", got)
+	}
+	// stderr is where an exit that explains itself does so -- a usage limit, a
+	// compaction, a refused tool. For a review that stopped early that is the
+	// whole explanation, so dropping it defeats the point of keeping the rest.
+	if !strings.Contains(got, "usage limit reached") {
+		t.Errorf("the report must carry stderr, where a truncated run explains itself:\n%s", got)
+	}
+}
+
+// TestALiveReportDoesNotClaimNothingWasPosted is the safety half of writing
+// live reports at all.
+//
+// The report header and the verdict note were written when the only reports
+// were dry-run reports, and both said so unconditionally: "dry run, nothing
+// posted", and "Nothing was submitted here". Reused for a live review those
+// sentences are false about the one thing an operator opens the file to
+// establish, and false in the reassuring direction -- the comments are on a
+// colleague's pull request.
+func TestALiveReportDoesNotClaimNothingWasPosted(t *testing.T) {
+	dir := t.TempDir()
+	f := &runner.Fake{Replies: []runner.Reply{
+		{Match: "code-review", Result: runner.Result{Stdout: []byte("a review with no verdict line")}},
+	}}
+	rr := New(f, "claude", nil, false, dir)
+
+	res, err := rr.Run(context.Background(), "work", ref, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ReportPath == "" {
+		t.Fatal("a live review with no verdict must keep its output")
+	}
+	body, rerr := os.ReadFile(res.ReportPath)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	got := string(body)
+	for _, lie := range []string{"nothing posted", "Nothing was submitted here", "dry run"} {
+		if strings.Contains(got, lie) {
+			t.Errorf("a live report must not contain %q — the comments are on the pull "+
+				"request:\n%s", lie, got)
+		}
+	}
+	if !strings.Contains(got, "posted on the pull request") {
+		t.Errorf("a live report must say plainly that the comments are posted:\n%s", got)
 	}
 }

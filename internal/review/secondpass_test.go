@@ -45,7 +45,7 @@ func TestSecondPassNoteReachesTheSystemPromptAndNotThePrompt(t *testing.T) {
 	}
 	args := f.Calls[0].Args
 	want := []string{
-		"-p", "/code-review " + ref.URL() + " --comment",
+		"-p", rr.Prompt(ref),
 		"--append-system-prompt", verdictInstruction + "\n\n" + secondPassNote(PreviousPass{HeadSHA: prevSHA, Posted: true}),
 		"--permission-mode", "bypassPermissions",
 	}
@@ -60,9 +60,11 @@ func TestSecondPassNoteReachesTheSystemPromptAndNotThePrompt(t *testing.T) {
 		t.Fatalf("no -p in %q", args)
 	}
 	prompt := args[i+1]
-	if strings.Contains(prompt, "\n") {
-		t.Errorf("-p = %q; a newline in the prompt is a second line of $ARGUMENTS", prompt)
-	}
+	// The newline check that used to be here is gone: the prompt is
+	// deliberately multi-line now, because the verdict ask has to be restated
+	// in the user turn. What still matters is that the second-pass note is not
+	// in there -- it is long, it is about history rather than the task, and
+	// the system prompt is where it belongs.
 	for _, frag := range []string{"previous automated pass", "restate", prevSHA[:12], verdictInstruction} {
 		if strings.Contains(prompt, frag) {
 			t.Errorf("-p = %q must not carry %q: it would become the slash command's $ARGUMENTS", prompt, frag)
@@ -80,7 +82,7 @@ func TestFirstPassArgvCarriesNoSecondPassNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"-p", "/code-review " + ref.URL(),
+		"-p", rr.Prompt(ref),
 		"--append-system-prompt", verdictInstruction,
 		"--permission-mode", "bypassPermissions",
 	}
@@ -263,14 +265,14 @@ func TestTheIncompleteNoteAlsoTravelsAsASystemPromptAndNotInThePrompt(t *testing
 		t.Fatal(err)
 	}
 	want := []string{
-		"-p", "/code-review " + ref.URL() + " --comment",
+		"-p", rr.Prompt(ref),
 		"--append-system-prompt", verdictInstruction + "\n\n" + secondPassNote(*pp),
 	}
 	if !slices.Equal(f.Calls[0].Args, want) {
 		t.Errorf("Args = %q, want %q", f.Calls[0].Args, want)
 	}
 	prompt := f.Calls[0].Args[slices.Index(f.Calls[0].Args, "-p")+1]
-	for _, frag := range []string{"\n", "did not finish", "previous automated pass"} {
+	for _, frag := range []string{"did not finish", "previous automated pass"} {
 		if strings.Contains(prompt, frag) {
 			t.Errorf("-p = %q must not carry %q", prompt, frag)
 		}
@@ -293,7 +295,7 @@ func TestAPreviousPassThatPostedNothingSendsNoNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"-p", "/code-review " + ref.URL() + " --comment",
+		"-p", rr.Prompt(ref),
 		"--append-system-prompt", verdictInstruction,
 		"--permission-mode", "bypassPermissions",
 	}
