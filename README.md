@@ -272,6 +272,41 @@ configured Google Chat account can actually see named spaces).
 Every command accepts `-config <path>` to point at a config file other than
 the default.
 
+## Concurrency
+
+By default reviews are serial: one pull request is reviewed to completion
+before the next starts. Three posted at once, at roughly 12 minutes each, is
+therefore about 36 minutes before the last one is done.
+
+`review_concurrency` raises that. It must not exceed `max_reviews_per_sweep`,
+and the default is `1` so an upgrade never makes firstpass do more at once
+than the operator asked for.
+
+```yaml
+max_reviews_per_sweep: 3
+review_concurrency: 3
+```
+
+Sweeps themselves stay serial — one sweep finishes before the next begins.
+That is what keeps `recover in-flight` sound: an `in_flight` record found at
+the start of a sweep can only have come from a run that is no longer alive.
+
+Two things worth knowing before raising it:
+
+- **The limit you hit first is probably not this machine.** Each review is a
+  `claude -p` session doing tool calls, and they share one account's rate
+  limits. Past a small number, extra workers tend to queue rather than add
+  throughput. Try 3 before trying more.
+- **Ctrl-C costs more.** A hard kill mid-review leaves an `in_flight` record
+  that becomes `needs_attention` and is never retried automatically. With
+  three reviews in flight that is three of them. Stop the daemon between
+  sweeps where you can.
+
+A repository is never touched by two reviews at once: worktrees are per pull
+request, but the bare mirror behind them is per repository, so `Prepare` takes
+a per-repository lock. Two pull requests from the same service queue for the
+clone and then review in parallel.
+
 ## Tests
 
 ```
