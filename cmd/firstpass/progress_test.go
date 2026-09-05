@@ -184,6 +184,104 @@ func TestHeartbeatTicksWhileReviewingThenStopsReliably(t *testing.T) {
 // leak. The result table itself is unconditional in cmdScan/cmdReplay (it is
 // not gated by quiet at all), so nothing further is needed to prove it still
 // prints.
+// TestConcurrentReviewsEachKeepTheirOwnHeartbeat is the renderer's half of
+// review_concurrency.
+//
+// The heartbeat used to live in a single field, and startHeartbeat stopped
+// whatever was there before starting a new one. With one review at a time
+// that was a harmless defensive reset. With several it is a bug in two
+// directions at once: the second review silences the first review's
+// heartbeat -- so the longest-running review, the one an operator is actually
+// waiting on, is the one that goes quiet -- and the first goroutine's stop
+// func is overwritten, so nothing can ever stop it.
+//
+// This drives two overlapping reviews through the same renderer and requires
+// that both tick, and that finishing one leaves the other ticking. Against
+// the single-field version the first review's ticker is stopped before it can
+// ever fire, and the wait for two ticks times out.
+func TestConcurrentReviewsEachKeepTheirOwnHeartbeat(t *testing.T) {
+	var buf bytes.Buffer
+	r := newProgressRenderer(&buf, 30*time.Minute)
+
+	start := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return start }
+
+	built := make(chan *fakeTicker, 4)
+	r.newTicker = func(time.Duration) heartbeatTicker {
+		tk := newFakeTicker()
+		built <- tk
+		return tk
+	}
+	ticked := make(chan struct{}, 8)
+	r.onTick = func() { ticked <- struct{}{} }
+
+	const wait = 5 * time.Second
+
+	take := func(what string) *fakeTicker {
+		t.Helper()
+		select {
+		case tk := <-built:
+			return tk
+		case <-time.After(wait):
+			t.Fatalf("%s never built a heartbeat ticker", what)
+			return nil
+		}
+	}
+	awaitTicks := func(n int, what string) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			select {
+			case <-ticked:
+			case <-time.After(wait):
+				t.Fatalf("%s: only %d of %d heartbeat ticks were processed", what, i, n)
+			}
+		}
+	}
+
+	r.Handle(pipeline.Event{Stage: pipeline.StageReviewStarted, Ref: ref(1), Index: 1, Total: 2})
+	first := take("the first review")
+	r.Handle(pipeline.Event{Stage: pipeline.StageReviewStarted, Ref: ref(2), Index: 2, Total: 2})
+	second := take("the second review")
+
+	first.ch <- start.Add(30 * time.Second)
+	second.ch <- start.Add(30 * time.Second)
+	awaitTicks(2, "with both reviews in flight")
+
+	if got := buf.String(); !strings.Contains(got, "reviewing "+ref(1).Key()) ||
+		!strings.Contains(got, "reviewing "+ref(2).Key()) {
+		t.Fatalf("both reviews must report their own elapsed time, got:\n%s", got)
+	}
+
+	// Finishing the first review must stop its heartbeat and leave the
+	// second's alone. Bounded on its own goroutine because Handle waits for
+	// the heartbeat goroutine to exit: a regression that stopped the wrong one
+	// would hang here rather than fail.
+	finished := make(chan struct{})
+	go func() {
+		r.Handle(pipeline.Event{Stage: pipeline.StageReviewFinished, Ref: ref(1), Index: 1, Total: 2,
+			Detail: "reviewed in 30s"})
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(wait):
+		t.Fatal("Handle(review_finished) never returned: the wrong heartbeat was stopped, or none was")
+	}
+
+	before := strings.Count(buf.String(), "reviewing "+ref(2).Key())
+	second.ch <- start.Add(60 * time.Second)
+	awaitTicks(1, "after the first review finished")
+	if after := strings.Count(buf.String(), "reviewing "+ref(2).Key()); after != before+1 {
+		t.Errorf("the second review's heartbeat lines went %d -> %d; finishing one review "+
+			"must not silence the others still running", before, after)
+	}
+
+	r.stopHeartbeat()
+	if _, ok := <-second.stopped; ok {
+		t.Error("the second ticker should have been stopped")
+	}
+}
+
 func TestQuietWiringLeavesTheHookNil(t *testing.T) {
 	p := &pipeline.Pipeline{}
 	var buf bytes.Buffer

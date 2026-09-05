@@ -376,15 +376,16 @@ type Pipeline struct {
 	// must not block; the CLI renders it. Left nil, nothing about progress
 	// reporting changes for the caller: every call site guards it.
 	//
-	// It is called from one goroutine only, and the events for one review
-	// arrive strictly in order: review_started is always followed by that
-	// review's review_finished with no other event in between, because a
-	// sweep reviews one PR at a time. The CLI's renderer relies on both
-	// guarantees -- its heartbeat is started and stopped by that pair and is
-	// protected by no lock at all. Anything that makes reviews concurrent must
-	// either serialise the calls into this hook or make every renderer safe
-	// for concurrent use in the same change.
+	// It is never entered twice at once: the pipeline serialises its calls,
+	// so a hook needs no lock of its own. What it must not assume is ordering.
+	// Reviews run concurrently, so review_started for one pull request is
+	// routinely followed by events for another before its own
+	// review_finished. A hook that keys per-review state off the pair must key
+	// it by Event.Ref, not by "the review in progress" -- there may be several.
 	Progress func(Event)
+
+	// progressMu is what makes the first of those guarantees true.
+	progressMu sync.Mutex
 }
 
 type candidate struct {

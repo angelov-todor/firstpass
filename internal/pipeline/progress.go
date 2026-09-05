@@ -62,10 +62,24 @@ type Event struct {
 
 // progress calls the hook if one is set. Every call site in this package
 // goes through it, so a nil Progress is free and cannot panic.
+// progress delivers one event to the hook, one caller at a time.
+//
+// Reviews run concurrently, so this is reached from several goroutines. The
+// lock is here rather than in the hook because the hook is supplied by the
+// caller: the promise on Pipeline.Progress is that it is never entered twice
+// at once, and it is cheaper to keep that promise in one place than to require
+// every present and future implementation to be safe for concurrent use.
+//
+// It does not make the *ordering* guarantee that a serial sweep had. Events
+// for different pull requests interleave, and a renderer that assumed
+// otherwise had to change; see cmd/firstpass/progressRenderer.
 func (p *Pipeline) progress(ev Event) {
-	if p.Progress != nil {
-		p.Progress(ev)
+	if p.Progress == nil {
+		return
 	}
+	p.progressMu.Lock()
+	defer p.progressMu.Unlock()
+	p.Progress(ev)
 }
 
 // messagesFetchedDetail is the free-text detail for StageMessagesFetched.
