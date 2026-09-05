@@ -272,6 +272,28 @@ configured Google Chat account can actually see named spaces).
 Every command accepts `-config <path>` to point at a config file other than
 the default.
 
+## Tests
+
+```
+go test ./...            # the suite
+scripts/test-race.sh     # the suite under the race detector, in Docker
+```
+
+The race detector needs cgo and a working C toolchain. Rather than require one
+on every machine, `scripts/test-race.sh` runs the suite in the container
+defined by `Dockerfile.test`; nothing is installed on the host. It takes the
+same arguments as `go test`:
+
+```
+scripts/test-race.sh ./internal/pipeline
+scripts/test-race.sh -run TestSweep ./internal/pipeline
+```
+
+Run it before changing anything concurrent. It has already caught one defect
+the Windows suite could not see: a cancelled command was killed but `Run` did
+not return until it finished anyway, so `review_timeout` and Ctrl-C both failed
+to stop a review.
+
 ## Safety
 
 Read this before running anything other than `doctor` or `scan -print-only`.
