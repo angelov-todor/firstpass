@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/angelov-todor/firstpass/internal/chat"
@@ -353,6 +354,23 @@ type Pipeline struct {
 	// dry run and in print-only mode.
 	React Reactor
 
+	// reactionMu serialises the reaction bookkeeping. Both reaction stages
+	// read a message record, decide from it, and write it back, and both are
+	// reached from handle -- so two pull requests posted in one message, which
+	// is the ordinary case, run them concurrently. Without this each stage is
+	// a lost update: both candidates read WatchApplied false, both set it,
+	// both write, and the message gets two 👀 reactions. The store's latch is
+	// what makes an outward act happen at most once, and a latch behind a
+	// read-modify-write is only a latch if the sequence is atomic.
+	//
+	// Held across the chat calls as well as the store writes, which is the
+	// simpler of the two available designs and the one less likely to be
+	// subtly wrong. It costs a reaction call waiting on another reaction call,
+	// bounded by chat_timeout, against reviews that take minutes; releasing
+	// the lock around the call would mean writing back a record another
+	// goroutine may have changed in the meantime.
+	reactionMu sync.Mutex
+
 	// Progress, when non-nil, is called as a sweep proceeds so a caller can
 	// show the operator that a long review is working rather than wedged. It
 	// must not block; the CLI renders it. Left nil, nothing about progress
@@ -478,7 +496,27 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 
 	st := newSweepState(p.Cfg.MaxReviewsPerSweep)
 
+	// Results are collected by index and appended in candidate order after
+	// every worker has finished, rather than appended as they complete. Two
+	// reasons, and neither is the append race: a report whose rows arrive in
+	// whatever order reviews happened to end would make every test that reads
+	// it order-dependent on timing, and an operator comparing two sweeps could
+	// not diff them. A nil entry is a candidate that never ran.
+	results := make([]*Decision, len(cands))
+
+	// A concurrency of zero would deadlock on the semaphore, and Config
+	// literals built in tests do not go through Default. One is serial, which
+	// is what this loop did before and remains the shipped default.
+	workers := p.Cfg.ReviewConcurrency
+	if workers < 1 {
+		workers = 1
+	}
+
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
 	interrupted := false
+
+dispatch:
 	for i, c := range cands {
 		// Ctrl-C mid-sweep used to keep iterating: every remaining candidate
 		// burned a pending attempt on the cancelled-context Inspect failure,
@@ -488,7 +526,48 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 			p.Log.Warn("sweep interrupted; holding the watermark", "err", ctx.Err())
 			break
 		}
-		rep.Decisions = append(rep.Decisions, p.handle(ctx, c, &rep, st, opts, i+1, len(cands)))
+		// Waiting for a free slot has to be interruptible. Sending on the
+		// semaphore alone would block here for as long as the longest running
+		// review -- up to review_timeout -- before noticing a Ctrl-C that has
+		// already arrived.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			interrupted = true
+			p.Log.Warn("sweep interrupted while waiting for a review slot; holding the watermark",
+				"err", ctx.Err())
+			break dispatch
+		}
+
+		wg.Add(1)
+		go func(i int, c candidate) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			// Cancelled while this candidate waited for a slot. handle would
+			// cope, but it would spend a pending attempt on an Inspect that
+			// cannot succeed.
+			if ctx.Err() != nil {
+				return
+			}
+			d := p.handle(ctx, c, &rep, st, opts, i+1, len(cands))
+			results[i] = &d
+		}(i, c)
+	}
+	wg.Wait()
+
+	// A cancellation that arrived during the last candidate's review left the
+	// dispatch loop with nothing further to check, so it would not have been
+	// noticed above -- and the watermark would then advance over a batch whose
+	// final review was killed.
+	if !interrupted && ctx.Err() != nil {
+		interrupted = true
+		p.Log.Warn("sweep interrupted during the last review; holding the watermark", "err", ctx.Err())
+	}
+
+	for _, d := range results {
+		if d != nil {
+			rep.Decisions = append(rep.Decisions, *d)
+		}
 	}
 
 	// Fold the shared state back into the report. Everything below reads these

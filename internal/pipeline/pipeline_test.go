@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,6 +46,12 @@ func (f *fakeChat) Fetch(_ context.Context, since string, limit int) ([]chat.Mes
 }
 
 type fakePRs struct {
+	// mu guards the recording slices below. Once reviews can run
+	// concurrently, every fake that records what it was asked is shared
+	// mutable state, and an unsynchronised append is a data race whether or
+	// not the test happens to notice. info and err are written before the
+	// sweep and only read during it.
+	mu   sync.Mutex
 	info map[string]ghpr.PRInfo
 	err  map[string]error
 
@@ -69,7 +76,9 @@ type submittedVerdict struct {
 }
 
 func (f *fakePRs) Inspect(_ context.Context, ref prref.PRRef) (ghpr.PRInfo, error) {
+	f.mu.Lock()
 	f.inspected = append(f.inspected, ref.Key())
+	f.mu.Unlock()
 	if e, ok := f.err[ref.Key()]; ok {
 		return ghpr.PRInfo{}, e
 	}
@@ -80,11 +89,14 @@ func (f *fakePRs) Inspect(_ context.Context, ref prref.PRRef) (ghpr.PRInfo, erro
 }
 
 func (f *fakePRs) SubmitReview(_ context.Context, ref prref.PRRef, verdict, body string) error {
+	f.mu.Lock()
 	f.submitted = append(f.submitted, submittedVerdict{key: ref.Key(), verdict: verdict, body: body})
+	f.mu.Unlock()
 	return f.submitErr
 }
 
 type fakeWTs struct {
+	mu        sync.Mutex
 	prepared  []string
 	cleanedUp int
 	err       error
@@ -106,11 +118,18 @@ func (f *fakeWTs) Prepare(_ context.Context, ref prref.PRRef) (string, func(), e
 	if f.err != nil {
 		return "", func() {}, f.err
 	}
+	f.mu.Lock()
 	f.prepared = append(f.prepared, ref.Key())
-	return filepath.Join("work", ref.Repo), func() { f.cleanedUp++ }, nil
+	f.mu.Unlock()
+	return filepath.Join("work", ref.Repo), func() {
+		f.mu.Lock()
+		f.cleanedUp++
+		f.mu.Unlock()
+	}, nil
 }
 
 type fakeRev struct {
+	mu  sync.Mutex
 	ran []string
 	err error
 	// result is returned alongside err, so a test can model claude exiting
@@ -120,6 +139,12 @@ type fakeRev struct {
 	// onRun runs after the review is recorded as having happened, where a
 	// Ctrl-C arriving as claude finishes would land.
 	onRun func()
+	// duringRun stands in for the time claude spends working, and unlike
+	// onRun it is told which pull request it is reviewing. That is what lets a
+	// test hold several reviews open at once, or make them finish in a chosen
+	// order. It runs outside the fake's lock, so a hook that blocks does not
+	// stop the other reviews from being recorded.
+	duringRun func(ref prref.PRRef)
 	// prevPasses records the *review.PreviousPass handed to each invocation,
 	// in order, so a test can prove a later pass told the reviewer which
 	// commit the pass before it looked at and whether that pass finished --
@@ -128,8 +153,14 @@ type fakeRev struct {
 }
 
 func (f *fakeRev) Run(ctx context.Context, _ string, ref prref.PRRef, previous *review.PreviousPass) (review.Result, error) {
+	f.mu.Lock()
 	f.ran = append(f.ran, ref.Key())
 	f.prevPasses = append(f.prevPasses, previous)
+	f.mu.Unlock()
+
+	if f.duringRun != nil {
+		f.duringRun(ref)
+	}
 	// A cancelled context is an error, never a clean run: runner.OS returns
 	// ctx.Err() ahead of any exit status precisely so a review killed by a
 	// Ctrl-C or a deadline cannot be mistaken for one that finished.

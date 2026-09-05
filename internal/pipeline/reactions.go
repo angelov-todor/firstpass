@@ -117,6 +117,10 @@ func (p *Pipeline) startMessageReaction(ctx context.Context, trigger string, opt
 	if !p.reactionsEnabled(opts) || trigger == "" {
 		return
 	}
+	// See Pipeline.reactionMu: the latch below is a read-modify-write, and two
+	// pull requests from one message reach this concurrently.
+	p.reactionMu.Lock()
+	defer p.reactionMu.Unlock()
 	if ctx.Err() != nil {
 		// The context is already done -- a Ctrl-C during a review, which is
 		// the ordinary way to stop the daemon, and reviews run for up to
@@ -215,6 +219,15 @@ func (p *Pipeline) settleMessageReaction(ctx context.Context, trigger string, op
 	if !p.reactionsEnabled(opts) || trigger == "" {
 		return
 	}
+	// See Pipeline.reactionMu. This stage needs the lock for a second reason
+	// beyond its own latch: it decides from the outcomes of every pull request
+	// the message carried, and those records are being written by the very
+	// candidates it is asking about. Two of them finishing at once could both
+	// see the last outcome land and both settle, putting two result reactions
+	// on one message.
+	p.reactionMu.Lock()
+	defer p.reactionMu.Unlock()
+
 	if ctx.Err() != nil {
 		// The context is already done -- a Ctrl-C during a review, which is
 		// the ordinary way to stop the daemon, and reviews run for up to
