@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/angelov-todor/firstpass/internal/prref"
 	"github.com/angelov-todor/firstpass/internal/runner"
@@ -44,6 +45,41 @@ type Manager struct {
 	// URLFor overrides the clone URL. Left nil it builds the GitHub HTTPS URL;
 	// tests point it at a local fixture repository.
 	URLFor func(prref.PRRef) string
+
+	// mu guards mirrorLocks, which holds one mutex per mirror.
+	mu          sync.Mutex
+	mirrorLocks map[string]*sync.Mutex
+}
+
+// mirrorLock returns the mutex guarding one mirror, creating it on first use.
+//
+// Worktrees are per pull request but mirrors are per repository, so two pull
+// requests from the same service share one bare repository on disk -- and a
+// team that posts several pull requests from one service in a single message
+// is the ordinary case, not a corner. Every step of Prepare mutates that
+// shared repository: it may `RemoveAll` and re-clone it, it fetches into it,
+// and it runs `worktree prune`, which removes worktree registrations another
+// review is in the middle of creating. Concurrent Prepares for one repository
+// would range from git's "cannot lock ref" failures to one review deleting the
+// mirror another is reading.
+//
+// The lock is per mirror rather than global so reviews of different
+// repositories still run in parallel, which is the point of the exercise. It
+// is held for the whole of Prepare, including the clone: a first clone of a
+// large repository is slow, but a second review of the same repository has
+// nothing to do until that clone exists anyway.
+func (m *Manager) mirrorLock(mirror string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.mirrorLocks == nil {
+		m.mirrorLocks = map[string]*sync.Mutex{}
+	}
+	l, ok := m.mirrorLocks[mirror]
+	if !ok {
+		l = &sync.Mutex{}
+		m.mirrorLocks[mirror] = l
+	}
+	return l
 }
 
 func New(r runner.Runner, git, reposDir, workDir string) *Manager {
@@ -71,6 +107,10 @@ func (m *Manager) Prepare(ctx context.Context, ref prref.PRRef) (string, func(),
 	noop := func() {}
 	mirror := m.mirrorPath(ref)
 	work := m.workPath(ref)
+
+	lock := m.mirrorLock(mirror)
+	lock.Lock()
+	defer lock.Unlock()
 
 	for _, d := range []string{m.reposDir, m.workDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -125,6 +165,16 @@ func (m *Manager) Prepare(ctx context.Context, ref prref.PRRef) (string, func(),
 	}
 
 	cleanup := func() {
+		// The same mirror lock as Prepare: `worktree remove` rewrites the
+		// mirror's worktree registrations, so a review finishing must not run
+		// it while a sibling review of the same repository is inside Prepare.
+		// It is taken here rather than held from Prepare because cleanup runs
+		// after the review, which is the whole half-hour this lock must not
+		// span.
+		lock := m.mirrorLock(mirror)
+		lock.Lock()
+		defer lock.Unlock()
+
 		// context.Background: cleanup must still run when the review's deadline
 		// has already fired, or the worktree leaks.
 		_ = m.git0(context.Background(), "-C", mirror, "worktree", "remove", "--force", work)
