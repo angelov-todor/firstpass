@@ -19,13 +19,24 @@ One sweep, on a ticker or on demand:
    [Second pass](#second-pass).
 4. For each survivor, prepare a throwaway git worktree against a local bare
    mirror of the repository.
-5. Run `claude -p "/code-review <pr-url>"` in that worktree, with a
-   `--append-system-prompt` asking the reviewer to finish by printing one
-   machine-readable verdict line. The verdict instruction travels as a system
-   prompt rather than inside the `-p` value, because everything after the
-   slash command there becomes the command's own arguments.
+5. Run `claude -p "/code-review <pr-url>"` in that worktree, asking the
+   reviewer to finish by printing one machine-readable verdict line. The ask
+   is made **twice**: in the `-p` value after the command, and again in
+   `--append-system-prompt`.
+
+   The duplication is not belt-and-braces for its own sake. The system prompt
+   alone did not work: fourteen consecutive production reviews finished,
+   posted their comments, and printed no verdict line, so every one of them
+   submitted nothing. `/code-review` carries its own output contract, and over
+   a long agentic run the task's instructions win — the same reviewer ignored
+   an appended "do not perform any review" and worked for over three minutes.
+   Restating the ask in the user turn puts it where it is the last thing said.
 6. In dry run (the default), the findings are written to a report file. Live,
-   `/code-review` posts them as inline comments on the PR.
+   `/code-review` posts them as inline comments on the PR — and firstpass
+   writes a report anyway in the two live cases it could not otherwise
+   explain: a review that finished without a verdict line, and one that did
+   not finish at all. A live report says plainly that its comments are
+   posted.
 7. Submit that verdict as a GitHub review, so a reviewed PR is never silent —
    a clean one used to produce nothing at all, indistinguishable from the tool
    never having run. Nothing needing change (no findings, or only minor nits)

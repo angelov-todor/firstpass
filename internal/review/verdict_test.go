@@ -176,6 +176,16 @@ func TestThePromptCarriesTheVerdictAsk(t *testing.T) {
 		if !strings.HasPrefix(got, "/code-review ") {
 			t.Errorf("dryRun=%v: the command must still lead the prompt: %q", dry, got)
 		}
+		// ParseVerdict takes the LAST marked line, so "print nothing after it"
+		// is what stops a recap or a sentence quoting the marker from becoming
+		// the verdict. "findings" followed by prose mentioning approve
+		// resolves to approve -- an approval nobody chose, on a colleague's
+		// pull request. Saying so only in the system prompt is what this whole
+		// commit demonstrates is not enough.
+		if !strings.Contains(got, "Print nothing at all after that line") {
+			t.Errorf("dryRun=%v: the prompt must forbid output after the verdict line, or a "+
+				"trailing recap is read as the verdict: %q", dry, got)
+		}
 	}
 }
 

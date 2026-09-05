@@ -171,10 +171,14 @@ interface with a fake, so `pipeline` tests run without subprocesses.
    wrong once — the unchanged-head branch returned first and asserted the findings were posted — so
    the guard asserts the hedge and refuses the claim by pattern rather than by one phrasing of it.
 
-   The instruction is a system prompt, not part of the `-p` value: everything after `/code-review`
-   there becomes the slash command's `$ARGUMENTS`, which parses an effort level, a `--comment`
-   flag and a target, so prose appended to it would at best be dropped and at worst perturb the
-   target.
+   The instruction is a system prompt **and** part of the `-p` value. It was originally the system
+   prompt alone, reasoning that everything after `/code-review` becomes the slash command's
+   `$ARGUMENTS` and would be "at best dropped and at worst perturb the target". That prediction was
+   inverted by production: with the ask only in the system prompt, fourteen consecutive reviews
+   finished and printed no verdict line, so none of them submitted anything. The task's own
+   instructions dominate an appended system prompt over a long agentic run. The shipped command
+   definition turns out to reference `$ARGUMENTS` nowhere, so its arguments reach the reviewer as
+   trailing prompt text rather than being parsed for flags. See the 2026-09-05 fix.
 8. After a review that succeeded, `ghpr.SubmitReview` submits that verdict as a GitHub review:
    `gh pr review <n> --repo <owner>/<repo> --approve` for `approve`, `--comment` for `findings`. A
    dry run submits nothing and says in its report what the verdict would have been. A failed,

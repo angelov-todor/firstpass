@@ -134,7 +134,15 @@ const promptVerdictAsk = "\n\nWhen the review is complete, print exactly one of 
 	VerdictMarker + " findings\n" +
 	"Print `findings` if the review raised anything Critical or Important, and `approve` if it " +
 	"raised nothing or only minor nits. This line is the only thing firstpass can see about what " +
-	"you found."
+	"you found.\n" +
+	// ParseVerdict takes the *last* marked line, so this constraint is not
+	// politeness: a recap or a sentence quoting the marker after the real
+	// verdict is read as the verdict. "findings" followed by prose mentioning
+	// approve resolves to approve -- an approving review on a colleague's pull
+	// request that nobody chose, which is the single outcome this feature
+	// exists to prevent. The system prompt has said this all along, and this
+	// commit is the evidence that the system prompt alone is not obeyed.
+	"Print nothing at all after that line, and no other line beginning with " + VerdictMarker
 
 // Prompt is what claude is asked to do: the slash command naming the pull
 // request under review, and the verdict line firstpass reads back. Dry run and
@@ -401,16 +409,25 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 		//
 		// A failed write is ignored on purpose: this is diagnostics for an
 		// outcome that has already been recorded, and it must not turn a
-		// review that succeeded into one that reports an error.
-		if runErr == nil && out.Verdict == VerdictUnknown {
-			if path, werr := rr.writeReport(ref, previous, res.Stdout, out.Verdict, runErr); werr == nil {
+		// review that succeeded into one that reports an error. It also must
+		// not raise ReportError in live mode, whose recorded detail says
+		// nothing was posted -- true of a dry run and a dangerous lie here.
+		//
+		// A review that did not finish qualifies for the same reason the
+		// missing verdict does, and more urgently: it was posting comments one
+		// at a time when it stopped, firstpass cannot tell how far it got, and
+		// the operator is told comments may be half posted. Whatever the
+		// reviewer had printed is the only evidence of how far it actually
+		// got.
+		if runErr != nil || out.Verdict == VerdictUnknown {
+			if path, werr := rr.writeReport(ref, previous, res.Stdout, res.Stderr, out.Verdict, runErr); werr == nil {
 				out.ReportPath = path
 			}
 		}
 		return out, runErr
 	}
 
-	path, werr := rr.writeReport(ref, previous, res.Stdout, out.Verdict, runErr)
+	path, werr := rr.writeReport(ref, previous, res.Stdout, res.Stderr, out.Verdict, runErr)
 	if werr != nil {
 		if runErr != nil {
 			// The review failed and so did the report. The review failure is
@@ -423,10 +440,29 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 	return out, runErr
 }
 
-// verdictNote is the dry-run report's line about the verdict. A dry run
-// submits none, so the report is the only place the operator can watch
-// firstpass decide before it decides for real.
-func verdictNote(v Verdict) string {
+// verdictNote is the report's line about the verdict.
+//
+// It is written differently for the two kinds of report, because they describe
+// different facts. A dry-run report is subjunctive: nothing was submitted and
+// nothing was posted, so the operator is watching firstpass decide before it
+// decides for real. A live report is not: its findings are already on the pull
+// request, and saying "nothing was submitted here" about a review whose
+// comments are posted would send the operator looking for damage in the wrong
+// place -- or, worse, reassure them there is none.
+func verdictNote(v Verdict, dryRun bool) string {
+	if !dryRun {
+		switch v {
+		case VerdictApprove, VerdictFindings:
+			return fmt.Sprintf("**Verdict: %s** — submitted on the pull request. Its comments "+
+				"are posted there too.", v)
+		default:
+			return "**Verdict: unknown — the reviewer printed no verdict line firstpass " +
+				"recognises.** No verdict was submitted and none was guessed. This review's " +
+				"comments ARE posted on the pull request; only the verdict is missing. This " +
+				"report exists because that outcome cannot be diagnosed from firstpass's own " +
+				"records."
+		}
+	}
 	switch v {
 	case VerdictApprove:
 		return "**Verdict: the verdict would have been approve** — live, firstpass would have " +
@@ -451,7 +487,7 @@ func verdictNote(v Verdict) string {
 // which is what the operator needs to see what the new commits changed --
 // and the first pass's name is left exactly as it was, so nothing already on
 // disk moves.
-func (rr *Runner) writeReport(ref prref.PRRef, previous *PreviousPass, body []byte,
+func (rr *Runner) writeReport(ref prref.PRRef, previous *PreviousPass, body, stderr []byte,
 	verdict Verdict, failure error) (string, error) {
 
 	if err := os.MkdirAll(rr.reportsDir, 0o700); err != nil {
@@ -464,16 +500,36 @@ func (rr *Runner) writeReport(ref prref.PRRef, previous *PreviousPass, body []by
 	}
 	path := filepath.Join(rr.reportsDir, name)
 
-	header := fmt.Sprintf("# Review of %s\n\n%s\n\nGenerated %s — dry run, nothing posted.\n",
-		ref.Key(), ref.URL(), time.Now().UTC().Format(time.RFC3339))
-	header += "\n" + verdictNote(verdict) + "\n"
+	// "dry run, nothing posted" was hardcoded here while the only reports were
+	// dry-run reports. Live reports exist now, for reviews that finished
+	// without a verdict, and a live report claiming nothing was posted is
+	// false about the one thing an operator reads it to establish.
+	mode := "dry run, nothing posted"
+	if !rr.dryRun {
+		mode = "live run — this review's comments are posted on the pull request"
+	}
+	header := fmt.Sprintf("# Review of %s\n\n%s\n\nGenerated %s — %s.\n",
+		ref.Key(), ref.URL(), time.Now().UTC().Format(time.RFC3339), mode)
+	header += "\n" + verdictNote(verdict, rr.dryRun) + "\n"
 	if failure != nil {
 		header += fmt.Sprintf("\n**The review did not finish: %s**\n\nWhatever claude had printed "+
 			"before it stopped is below, and may be incomplete.\n", failure)
 	}
 	header += "\n---\n\n"
 
-	if err := os.WriteFile(path, append([]byte(header), body...), 0o600); err != nil {
+	out := append([]byte(header), body...)
+	// stderr, when there is any, is where an exit-0 truncation explains
+	// itself -- a usage limit, a context compaction, a tool refusal. Those are
+	// exactly the explanations for a review that finished and printed no
+	// verdict, so a report written to diagnose that outcome must not drop
+	// them.
+	if len(stderr) > 0 {
+		out = append(out, []byte("\n\n---\n\n## stderr\n\n```\n")...)
+		out = append(out, stderr...)
+		out = append(out, []byte("\n```\n")...)
+	}
+
+	if err := os.WriteFile(path, out, 0o600); err != nil {
 		return "", err
 	}
 	return path, nil

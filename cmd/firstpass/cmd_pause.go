@@ -22,9 +22,22 @@ func cmdPause(args []string, on bool) error {
 		return err
 	}
 
-	cfg, err := config.Load(*cfgPath)
+	// LoadLenient, not Load: this is the kill switch. Config keys are decoded
+	// strictly everywhere else, and rightly -- a key in the wrong place
+	// silently keeps its default. But pause needs state_dir and nothing else,
+	// and refusing to compute it because some unrelated key is misspelled
+	// would mean a typo in the config file takes away the operator's ability
+	// to stop a live sweep that is posting comments to colleagues' pull
+	// requests. Whatever is wrong with the file, it must still be possible to
+	// pull the handle.
+	cfg, unknown, err := config.LoadLenient(*cfgPath)
 	if err != nil {
 		return err
+	}
+	// Reported, not swallowed: a key firstpass ignored is exactly the sort of
+	// thing that stays hidden until it matters.
+	for _, u := range unknown {
+		fmt.Fprintf(os.Stderr, "warning: ignoring unrecognised config: %s\n", u)
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return err

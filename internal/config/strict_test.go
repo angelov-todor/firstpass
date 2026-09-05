@@ -87,3 +87,46 @@ func TestLoadAcceptsAnEmptyFile(t *testing.T) {
 		t.Error("defaults alone must still fail validation")
 	}
 }
+
+// TestLoadLenientKeepsTheKillSwitchReachable is the counterweight to strict
+// decoding.
+//
+// Strictness is right for the commands that act: a key in the wrong place
+// silently keeps its default, and firstpass acting on a configuration the
+// operator does not believe it has is the failure worth being loud about. It
+// is not right for `firstpass pause`, which needs state_dir and nothing else.
+// A typo in some unrelated key must not take away the operator's ability to
+// stop a live sweep that is posting comments to colleagues' pull requests.
+func TestLoadLenientKeepsTheKillSwitchReachable(t *testing.T) {
+	p := writeConfig(t, `
+space: "spaces/AAA"
+state_dir: "C:/state"
+revue_concurrency: 3
+paths:
+  state_dir: "C:/wrong"
+`)
+	if _, err := Load(p); err == nil {
+		t.Fatal("the strict loader must reject this file, or this test proves nothing")
+	}
+
+	c, unknown, err := LoadLenient(p)
+	if err != nil {
+		t.Fatalf("the lenient loader must still load: %v", err)
+	}
+	if c.StateDir != "C:/state" {
+		t.Errorf("StateDir = %q, want the value from the file: pause writes its file there", c.StateDir)
+	}
+	if len(unknown) == 0 {
+		t.Error("the ignored keys must be reported, or leniency is just the silence " +
+			"strict decoding was added to fix")
+	}
+}
+
+// Malformed YAML is still an error under the lenient loader: it relaxes which
+// keys are accepted, not whether the file parses at all.
+func TestLoadLenientStillRejectsMalformedYAML(t *testing.T) {
+	p := writeConfig(t, "space: \"unterminated\n  - [{\n")
+	if _, _, err := LoadLenient(p); err == nil {
+		t.Error("unparseable YAML must fail even leniently")
+	}
+}

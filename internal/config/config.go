@@ -167,6 +167,50 @@ func Load(path string) (Config, error) {
 	return c, nil
 }
 
+// LoadLenient is Load without the strictness, returning any unknown keys it
+// found instead of failing on them.
+//
+// It exists for one caller: the kill switch. `firstpass pause` needs
+// state_dir and nothing else, and refusing to compute it because some
+// unrelated key is misspelled would mean a typo in the config file disables
+// the operator's ability to stop a live sweep that is posting comments to
+// colleagues' pull requests. Strictness is worth a failed `scan`; it is not
+// worth that.
+//
+// The unknown keys are returned rather than swallowed so the caller can say
+// what it ignored -- silence here would be the same mistake strict decoding
+// was added to fix. A genuinely malformed file (bad YAML, a duration that
+// will not parse) still fails: this relaxes which *keys* are accepted, not
+// whether the file parses.
+func LoadLenient(path string) (Config, []string, error) {
+	c := Default()
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return c, nil, nil
+	}
+	if err != nil {
+		return c, nil, err
+	}
+	if err := yaml.Unmarshal(b, &c); err != nil {
+		return c, nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	// Decode a second time, strictly, purely to name what the first pass
+	// accepted in silence.
+	var unknown []string
+	probe := Default()
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&probe); err != nil && !errors.Is(err, io.EOF) {
+		for _, line := range strings.Split(err.Error(), "\n") {
+			if line = strings.TrimSpace(line); line != "" && strings.Contains(line, "not found in type") {
+				unknown = append(unknown, line)
+			}
+		}
+	}
+	return c, unknown, nil
+}
+
 // Validate rejects configurations that would be unsafe or useless to run.
 func (c Config) Validate() error {
 	if c.Space == "" {
