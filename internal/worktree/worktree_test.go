@@ -2,11 +2,14 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/angelov-todor/firstpass/internal/prref"
 	"github.com/angelov-todor/firstpass/internal/runner"
@@ -288,5 +291,152 @@ func TestGitInvocationsAreNonInteractive(t *testing.T) {
 				t.Errorf("git call %q must carry %q so it cannot block on a prompt", line, want)
 			}
 		}
+	}
+}
+
+// TestPrepareGivesUpOnTheMirrorWhenItsContextEnds is why the gate is a channel
+// and not a sync.Mutex.
+//
+// handle builds the CloneTimeout deadline before it calls Prepare, so a
+// candidate queued behind a cold clone of the same repository spends its own
+// clone budget waiting. On a Mutex it would go on waiting past that deadline
+// and only fail later, having run a git command against an already-expired
+// context -- and a Ctrl-C could not free it either, because a worker parked on
+// Lock() is unreachable, so shutdown would have to wait out the clone.
+//
+// Bounded well below the wait a Mutex would impose, so a regression fails here
+// rather than hanging the suite.
+func TestPrepareGivesUpOnTheMirrorWhenItsContextEnds(t *testing.T) {
+	base := t.TempDir()
+	m := New(runner.OS{}, "git", filepath.Join(base, "repos"), filepath.Join(base, "work"))
+	m.URLFor = func(prref.PRRef) string { return "https://example.invalid/x.git" }
+
+	// Stand in for a sibling review holding the mirror through a long clone.
+	held := prref.PRRef{Owner: "Example-Org", Repo: "busy", Number: 1}
+	mirror := m.mirrorPath(held)
+	if err := m.lockMirror(context.Background(), mirror); err != nil {
+		t.Fatal(err)
+	}
+	defer m.unlockMirror(mirror)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	type outcome struct {
+		err     error
+		elapsed time.Duration
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		start := time.Now()
+		_, _, err := m.Prepare(ctx, prref.PRRef{Owner: "Example-Org", Repo: "busy", Number: 2})
+		done <- outcome{err, time.Since(start)}
+	}()
+
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, context.DeadlineExceeded) {
+			t.Errorf("err = %v, want context.DeadlineExceeded", got.err)
+		}
+		if got.elapsed > 3*time.Second {
+			t.Errorf("Prepare took %s to give up on a 50ms deadline", got.elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Prepare never returned: the wait for the mirror ignores its context, " +
+			"so a queued review cannot be interrupted")
+	}
+}
+
+// overlapRunner records the greatest number of git invocations that were ever
+// in flight at the same moment.
+type overlapRunner struct {
+	mu     sync.Mutex
+	active int
+	max    int
+}
+
+func (o *overlapRunner) Run(ctx context.Context, dir, name string, args ...string) (runner.Result, error) {
+	o.mu.Lock()
+	o.active++
+	if o.active > o.max {
+		o.max = o.active
+	}
+	o.mu.Unlock()
+
+	// Wide enough that two unsynchronised Prepares would certainly overlap:
+	// each makes several git calls, so the windows are hundreds of
+	// milliseconds long against a scheduling gap of microseconds.
+	time.Sleep(50 * time.Millisecond)
+
+	o.mu.Lock()
+	o.active--
+	o.mu.Unlock()
+	return runner.Result{}, nil
+}
+
+func (o *overlapRunner) peak() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.max
+}
+
+// TestPreparesForOneRepositoryDoNotOverlap is the invariant that makes
+// concurrent reviews safe at all.
+//
+// Worktrees are per pull request; mirrors are per repository. Two pull requests
+// from one service -- which is how the team posts them -- share a bare
+// repository, and Prepare rewrites it throughout: it can RemoveAll and
+// re-clone it, it fetches into it, and it runs `worktree prune`, which removes
+// registrations another Prepare is in the middle of making.
+func TestPreparesForOneRepositoryDoNotOverlap(t *testing.T) {
+	o := &overlapRunner{}
+	base := t.TempDir()
+	m := New(o, "git", filepath.Join(base, "repos"), filepath.Join(base, "work"))
+	m.URLFor = func(prref.PRRef) string { return "https://example.invalid/x.git" }
+
+	var wg sync.WaitGroup
+	for _, n := range []int{1, 2} {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			r := prref.PRRef{Owner: "Example-Org", Repo: "same-repo", Number: n}
+			_, cleanup, err := m.Prepare(context.Background(), r)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			cleanup()
+		}(n)
+	}
+	wg.Wait()
+
+	if peak := o.peak(); peak != 1 {
+		t.Errorf("%d git commands ran against one mirror at once, want 1; "+
+			"concurrent Prepares corrupt the shared bare repository", peak)
+	}
+}
+
+// TestPreparesForDifferentRepositoriesUseDifferentGates pins that the
+// serialisation above is per repository and not global. A single lock would
+// make this correct but pointless: reviews of unrelated services would queue
+// behind each other for no reason, which is the opposite of why concurrency
+// was added.
+//
+// Asserted on lock identity rather than on observed overlap, because "these
+// two things did happen at the same time" is a timing assertion and would be
+// flaky on a loaded machine.
+func TestPreparesForDifferentRepositoriesUseDifferentGates(t *testing.T) {
+	base := t.TempDir()
+	m := New(runner.OS{}, "git", filepath.Join(base, "repos"), filepath.Join(base, "work"))
+
+	a := m.mirrorPath(prref.PRRef{Owner: "Example-Org", Repo: "alpha", Number: 1})
+	b := m.mirrorPath(prref.PRRef{Owner: "Example-Org", Repo: "beta", Number: 1})
+	other := m.mirrorPath(prref.PRRef{Owner: "Example-Org", Repo: "alpha", Number: 2})
+
+	if m.mirrorGate(a) == m.mirrorGate(b) {
+		t.Error("different repositories must not share a lock")
+	}
+	if m.mirrorGate(a) != m.mirrorGate(other) {
+		t.Error("two pull requests in one repository must share a lock")
 	}
 }

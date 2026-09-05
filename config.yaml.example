@@ -90,6 +90,21 @@ interval: 5m
 # Default: 3
 max_reviews_per_sweep: 3
 
+# How many of those reviews may run at the same time. 1 is serial: each PR is
+# reviewed to completion before the next one starts.
+#
+# Raising this shortens a sweep roughly in proportion — three PRs at ~12
+# minutes each take ~36 minutes serially and ~12 in parallel. The limit you
+# hit first is unlikely to be this machine: every review is a `claude -p`
+# session and they share one account's rate limits, so a high number tends to
+# buy queueing rather than throughput. Try 3 before trying more.
+#
+# Setting this above max_reviews_per_sweep is allowed and simply has no
+# effect beyond the cap: the extra candidates are deferred to the next sweep
+# without doing any work.
+# Default: 1
+review_concurrency: 1
+
 # How long a single review may run before it is treated as needs_attention
 # (never retried automatically — a timeout may have fired mid-post).
 # A real review of a 3-commit PR took 12m15s -- 61% of the old 20m default --

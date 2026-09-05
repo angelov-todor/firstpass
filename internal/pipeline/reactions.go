@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"slices"
+	"sync"
 
 	"github.com/angelov-todor/firstpass/internal/chat"
 	"github.com/angelov-todor/firstpass/internal/prref"
@@ -22,6 +23,43 @@ const (
 	EmojiClean    = "✅"
 	EmojiFindings = "💬"
 )
+
+// messageLock returns the mutex guarding one chat message's reaction
+// bookkeeping, creating it on first use.
+//
+// Both reaction stages read a message record, decide from it, and write it
+// back, and both are reached from handle -- so two pull requests posted in one
+// message, which is the ordinary case, run them concurrently. Unsynchronised,
+// each stage is a lost update: both candidates read WatchApplied false, both
+// set it, both write, and the message gets two 👀. The store's latch is what
+// makes an outward act happen at most once, and a latch behind a
+// read-modify-write is only a latch if the sequence is atomic.
+//
+// The lock is held across the chat calls as well as the store writes. That is
+// the simpler of the two designs and the one less likely to be subtly wrong:
+// releasing it around the call would mean writing back a record another
+// goroutine may have changed in between. What that costs is a wait, and the
+// wait is why this is keyed by message rather than shared by the whole
+// pipeline. settleMessageReaction makes two chat calls, so a pipeline-wide
+// lock could hold an unrelated candidate for up to twice chat_timeout --
+// and it would hold it in the worst possible place, between that candidate's
+// in_flight record being written and its review starting, where an interrupt
+// leaves a needs_attention for a review that never began. Keyed by message,
+// the only candidates that can wait are ones posted in the same message,
+// whose reactions genuinely are the same piece of shared state.
+func (p *Pipeline) messageLock(name string) *sync.Mutex {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reactionLocks == nil {
+		p.reactionLocks = map[string]*sync.Mutex{}
+	}
+	l, ok := p.reactionLocks[name]
+	if !ok {
+		l = &sync.Mutex{}
+		p.reactionLocks[name] = l
+	}
+	return l
+}
 
 // reactionsEnabled is the one gate every reaction goes through.
 //
@@ -117,6 +155,11 @@ func (p *Pipeline) startMessageReaction(ctx context.Context, trigger string, opt
 	if !p.reactionsEnabled(opts) || trigger == "" {
 		return
 	}
+	// See messageLock: the latch below is a read-modify-write, and two pull
+	// requests from one message reach this concurrently.
+	lock := p.messageLock(trigger)
+	lock.Lock()
+	defer lock.Unlock()
 	if ctx.Err() != nil {
 		// The context is already done -- a Ctrl-C during a review, which is
 		// the ordinary way to stop the daemon, and reviews run for up to
@@ -215,6 +258,16 @@ func (p *Pipeline) settleMessageReaction(ctx context.Context, trigger string, op
 	if !p.reactionsEnabled(opts) || trigger == "" {
 		return
 	}
+	// See messageLock. This stage needs the lock for a second reason beyond
+	// its own latch: it decides from the outcomes of every pull request the
+	// message carried, and those records are being written by the very
+	// candidates it is asking about. Two of them finishing at once could both
+	// see the last outcome land and both settle, putting two result reactions
+	// on one message.
+	lock := p.messageLock(trigger)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if ctx.Err() != nil {
 		// The context is already done -- a Ctrl-C during a review, which is
 		// the ordinary way to stop the daemon, and reviews run for up to

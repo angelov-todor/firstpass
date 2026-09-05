@@ -144,6 +144,32 @@ func TestValidate(t *testing.T) {
 			t.Errorf("Default() with space, github_login, allow_owners and paths.chat_script set must be valid: %v", err)
 		}
 	})
+	t.Run("review_concurrency must be positive", func(t *testing.T) {
+		c := withRequired(Default())
+		c.ReviewConcurrency = 0
+		if err := c.Validate(); err == nil {
+			t.Error("a concurrency of zero would deadlock the sweep's semaphore")
+		}
+	})
+	t.Run("review_concurrency above the per-sweep cap is allowed", func(t *testing.T) {
+		// This was rejected at first, on the stated grounds that the extra
+		// candidates would prepare a worktree and then be turned away by the
+		// cap. That was untrue of the code in the same commit: the review slot
+		// is reserved before the clone, so a candidate over the cap is
+		// deferred having spent nothing. The two settings bound different
+		// things -- a resource limit and a per-sweep budget -- and the smaller
+		// one wins harmlessly.
+		//
+		// The cost of the rule was not theoretical either: Validate runs for
+		// every command, so `status` and `doctor` refused to open at all for a
+		// configuration that would have worked.
+		c := withRequired(Default())
+		c.MaxReviewsPerSweep = 2
+		c.ReviewConcurrency = 5
+		if err := c.Validate(); err != nil {
+			t.Errorf("concurrency above the cap must be allowed, not fail every command: %v", err)
+		}
+	})
 	t.Run("empty space is an error", func(t *testing.T) {
 		c := withRequired(Default())
 		c.Space = ""

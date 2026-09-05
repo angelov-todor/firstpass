@@ -51,7 +51,17 @@ type Config struct {
 	Interval           Duration `yaml:"interval"`
 	DryRun             bool     `yaml:"dry_run"`
 	MaxReviewsPerSweep int      `yaml:"max_reviews_per_sweep"`
-	ReviewTimeout      Duration `yaml:"review_timeout"`
+	// ReviewConcurrency is how many reviews may run at once. One is serial,
+	// which is what firstpass did before this existed and remains the default:
+	// a tool that writes comments on colleagues' pull requests should not
+	// change how much it does at once because somebody upgraded.
+	//
+	// The practical ceiling is unlikely to be this machine. Each review is a
+	// `claude -p` session doing tool calls, and they share one account's rate
+	// limits, so raising this past a small number tends to buy queueing rather
+	// than throughput.
+	ReviewConcurrency int      `yaml:"review_concurrency"`
+	ReviewTimeout     Duration `yaml:"review_timeout"`
 	// ChatTimeout, GHTimeout and CloneTimeout bound the three subprocesses
 	// that are not claude. Without them an unattended daemon has no bound on
 	// chat.py, gh, or a `git clone --bare` of a whole repository -- and on
@@ -79,6 +89,7 @@ func Default() Config {
 		Interval:           Duration(5 * time.Minute),
 		DryRun:             true,
 		MaxReviewsPerSweep: 3,
+		ReviewConcurrency:  1,
 		ReviewTimeout:      Duration(30 * time.Minute),
 		ChatTimeout:        Duration(2 * time.Minute),
 		GHTimeout:          Duration(time.Minute),
@@ -157,6 +168,18 @@ func (c Config) Validate() error {
 	if c.MaxReviewsPerSweep <= 0 {
 		return errors.New("max_reviews_per_sweep must be positive")
 	}
+	if c.ReviewConcurrency <= 0 {
+		return errors.New("review_concurrency must be positive (1 is serial)")
+	}
+	// review_concurrency above max_reviews_per_sweep is deliberately allowed.
+	// It was rejected here at first, on the grounds that the extra candidates
+	// would prepare a worktree and then be turned away by the cap -- which was
+	// simply not true of the code in the same commit: the review slot is
+	// reserved before the clone, so a candidate over the cap is deferred
+	// having spent nothing. The two settings bound different things, a
+	// resource limit and a per-sweep budget, and the smaller one wins
+	// harmlessly. Rejecting the pair meant `status` and `doctor` refused to
+	// run at all for a configuration that would have worked.
 	if c.ReviewTimeout.D() <= 0 {
 		return errors.New("review_timeout must be positive")
 	}
