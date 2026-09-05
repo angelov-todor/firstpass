@@ -3,8 +3,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,7 +143,25 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return c, err
 	}
-	if err := yaml.Unmarshal(b, &c); err != nil {
+	// KnownFields, not a plain Unmarshal: a key this struct does not have is an
+	// error, not something to ignore in silence.
+	//
+	// The trap is not a typo going unnoticed, it is a key that lands one level
+	// away from where it belongs and keeps its default. `state_dir` written
+	// under `paths:` parses cleanly, changes nothing, and leaves firstpass
+	// using the default state directory -- which cost real damage during a
+	// diagnostic session: a config written specifically to isolate a test run
+	// from production reported the production watermark and all 61 production
+	// review records, and a review run under it would have written to the live
+	// database. Nothing about the accepted config said so.
+	//
+	// A missing key is still fine and still takes its default; this rejects
+	// only keys that are present and meaningless, which are always a mistake.
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
+		// io.EOF is an empty file, which is a valid config: every field takes
+		// its default and Validate then reports whatever is actually required.
 		return c, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return c, nil

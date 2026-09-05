@@ -21,8 +21,10 @@ var ref = prref.PRRef{Owner: "Example-Org", Repo: "aex-balances", Number: 12}
 func TestPromptNamesThePRAndOmitsCommentInDryRun(t *testing.T) {
 	rr := New(&runner.Fake{}, "claude", nil, true, t.TempDir())
 	got := rr.Prompt(ref)
-	if got != "/code-review "+ref.URL() {
-		t.Errorf("Prompt() = %q, want the command plus the PR URL and nothing else", got)
+	// The command and its target lead the prompt; the verdict ask follows it.
+	// See promptVerdictAsk for why it is there.
+	if !strings.HasPrefix(got, "/code-review "+ref.URL()) {
+		t.Errorf("Prompt() = %q, want it to open with the command and the PR URL", got)
 	}
 	if strings.Contains(got, "--comment") {
 		t.Errorf("Prompt() = %q; a dry run must not post", got)
@@ -32,19 +34,24 @@ func TestPromptNamesThePRAndOmitsCommentInDryRun(t *testing.T) {
 func TestPromptNamesThePRAndIncludesCommentWhenLive(t *testing.T) {
 	rr := New(&runner.Fake{}, "claude", nil, false, t.TempDir())
 	got := rr.Prompt(ref)
-	if got != "/code-review "+ref.URL()+" --comment" {
-		t.Errorf("Prompt() = %q, want the command, the PR URL and --comment", got)
+	if !strings.HasPrefix(got, "/code-review "+ref.URL()+" --comment") {
+		t.Errorf("Prompt() = %q, want it to open with the command, the PR URL and --comment", got)
 	}
 }
 
 // Dry run and live must differ by exactly the --comment flag: that
 // equivalence is what makes reading a dry-run report a trustworthy preview of
-// what would be posted.
+// what would be posted. Asserted by removing the flag rather than by
+// appending it, because the flag now sits between the command and the verdict
+// ask rather than at the end.
 func TestDryRunAndLivePromptsDifferOnlyByComment(t *testing.T) {
 	dry := New(&runner.Fake{}, "claude", nil, true, t.TempDir()).Prompt(ref)
 	live := New(&runner.Fake{}, "claude", nil, false, t.TempDir()).Prompt(ref)
-	if live != dry+" --comment" {
+	if strings.Replace(live, " --comment", "", 1) != dry {
 		t.Errorf("dry = %q, live = %q; the only difference must be --comment", dry, live)
+	}
+	if !strings.Contains(live, "--comment") {
+		t.Errorf("live = %q must carry --comment", live)
 	}
 }
 
@@ -70,7 +77,7 @@ func TestRunInvokesClaudeInTheWorktreeWithConfiguredArgs(t *testing.T) {
 	// --append-system-prompt and the verdict instruction. extraArgs stays
 	// last, so operator config can still override anything firstpass sets.
 	want := []string{
-		"-p", "/code-review " + ref.URL(),
+		"-p", New(&runner.Fake{}, "claude", nil, true, t.TempDir()).Prompt(ref),
 		"--append-system-prompt", verdictInstruction,
 		"--permission-mode", "bypassPermissions",
 	}
@@ -92,7 +99,7 @@ func TestRunPassesTheLivePromptInOrder(t *testing.T) {
 		t.Fatalf("Calls = %+v", f.Calls)
 	}
 	want := []string{
-		"-p", "/code-review " + ref.URL() + " --comment",
+		"-p", rr.Prompt(ref),
 		"--append-system-prompt", verdictInstruction,
 		"--permission-mode", "bypassPermissions",
 	}
@@ -129,7 +136,13 @@ func TestRunWritesAReportInDryRun(t *testing.T) {
 func TestRunWritesNoReportWhenLive(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{Stdout: []byte("posted")}},
+		// A verdict line, because a live review that produced one has nothing
+		// left to explain: its findings are on the pull request and its
+		// verdict is in the record. The no-verdict case is the exception and
+		// is covered by the test below.
+		{Match: "code-review", Result: runner.Result{
+			Stdout: []byte("posted\n" + VerdictMarker + " findings\n"),
+		}},
 	}}
 	rr := New(f, "claude", nil, false, dir)
 
@@ -146,6 +159,44 @@ func TestRunWritesNoReportWhenLive(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("no report files expected, found %d", len(entries))
+	}
+}
+
+// TestALiveReviewWithNoVerdictKeepsItsOutput is the instrumentation that
+// should have existed from the start.
+//
+// A live review that finishes without a verdict line is the one outcome
+// firstpass cannot explain from its own records: the review worked, the
+// comments are posted, and the only thing missing is the line firstpass
+// needed. Live output used to be discarded unconditionally, so fourteen
+// consecutive production reviews recorded "verdict unknown" and left nothing
+// whatsoever to read. Working out why in the end needed a throwaway pull
+// request and a dry run to reproduce what had already happened fourteen times.
+func TestALiveReviewWithNoVerdictKeepsItsOutput(t *testing.T) {
+	dir := t.TempDir()
+	f := &runner.Fake{Replies: []runner.Reply{
+		{Match: "code-review", Result: runner.Result{Stdout: []byte("a full review, ending in prose")}},
+	}}
+	rr := New(f, "claude", nil, false, dir)
+
+	res, err := rr.Run(context.Background(), "work", ref, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Verdict != VerdictUnknown {
+		t.Fatalf("Verdict = %q, want unknown", res.Verdict)
+	}
+	if res.ReportPath == "" {
+		t.Fatal("a live review that printed no verdict must keep its output: " +
+			"without it there is no way to tell a reviewer that ignored the ask " +
+			"from one that was never asked")
+	}
+	body, err := os.ReadFile(res.ReportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "a full review, ending in prose") {
+		t.Errorf("the kept output must be what the reviewer actually printed:\n%s", body)
 	}
 }
 

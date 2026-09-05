@@ -139,25 +139,42 @@ func TestVerdictInstructionStatesTheProtocolAndTheSeverityRule(t *testing.T) {
 	}
 }
 
-// The regression this fix exists to prevent, pinned explicitly rather than
-// left implied by the argv equality above.
+// TestThePromptCarriesTheVerdictAsk is the regression guard for the bug that
+// made this whole feature inert in production, and it is the exact inverse of
+// the test that used to stand here.
 //
-// Everything after "/code-review" in the -p value becomes the slash command's
-// $ARGUMENTS. An instruction appended there is handed to a skill that parses
-// its arguments for an effort level, a --comment flag and a target: at best
-// it is ignored and no verdict line ever comes back, at worst it perturbs the
-// target parsing -- and either way firstpass would not find out until it
-// silently failed in production. The instruction travels as
-// --append-system-prompt instead, and the prompt stays byte-identical to the
-// form that has been exercised against real claude.
-func TestThePromptCarriesNoVerdictInstruction(t *testing.T) {
+// That test asserted the -p value must NOT mention the verdict, reasoning that
+// anything after "/code-review" becomes the slash command's $ARGUMENTS and
+// would therefore be "at best ignored and no verdict line ever comes back".
+// The reasoning was confident and wrong in the decisive direction: leaving the
+// ask out of the prompt is what meant no verdict line ever came back.
+// Fourteen consecutive production reviews finished, posted their comments and
+// submitted nothing, and the test read as protection the whole time.
+//
+// What was actually measured, once live stdout was captured:
+//
+//   - the ask in --append-system-prompt alone, with a trivial -p prompt: the
+//     line is printed exactly as asked. The mechanism was never the problem.
+//   - the same ask alongside "/code-review <url>": ignored, and so was a far
+//     blunter "do not perform any review" -- the reviewer worked for over
+//     three minutes. The task's own instructions dominate.
+//   - the ask added to the -p value: the reviewer's last line was
+//     "FIRSTPASS-VERDICT: findings", parsed and recorded. One variable
+//     changed between that run and the failing one.
+//
+// The $ARGUMENTS worry was real but harmless: the shipped command definition
+// references $ARGUMENTS nowhere, so its arguments reach the reviewer as
+// trailing prompt text rather than being parsed for flags.
+func TestThePromptCarriesTheVerdictAsk(t *testing.T) {
 	for _, dry := range []bool{true, false} {
 		got := New(&runner.Fake{}, "claude", nil, dry, t.TempDir()).Prompt(ref)
-		if strings.Contains(got, VerdictMarker) {
-			t.Errorf("dryRun=%v: the verdict protocol must not ride in the -p prompt: %q", dry, got)
+		if !strings.Contains(got, VerdictMarker+" approve") ||
+			!strings.Contains(got, VerdictMarker+" findings") {
+			t.Errorf("dryRun=%v: the prompt must ask for both verdict lines, or the reviewer "+
+				"finishes its review and prints nothing firstpass can read: %q", dry, got)
 		}
-		if strings.Contains(got, "\n") {
-			t.Errorf("dryRun=%v: the prompt must stay the single slash-command line: %q", dry, got)
+		if !strings.HasPrefix(got, "/code-review ") {
+			t.Errorf("dryRun=%v: the command must still lead the prompt: %q", dry, got)
 		}
 	}
 }
