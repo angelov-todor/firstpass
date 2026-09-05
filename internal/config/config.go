@@ -171,16 +171,15 @@ func (c Config) Validate() error {
 	if c.ReviewConcurrency <= 0 {
 		return errors.New("review_concurrency must be positive (1 is serial)")
 	}
-	// A concurrency above the cap would let several candidates each claim the
-	// last free slot's worth of preparatory work and then be turned away after
-	// paying for a clone. Refusing the combination is clearer than quietly
-	// clamping one to the other, because either value could be the one the
-	// operator meant.
-	if c.ReviewConcurrency > c.MaxReviewsPerSweep {
-		return fmt.Errorf("review_concurrency (%d) must not exceed max_reviews_per_sweep (%d): "+
-			"reviews beyond the cap would prepare a worktree and then be turned away",
-			c.ReviewConcurrency, c.MaxReviewsPerSweep)
-	}
+	// review_concurrency above max_reviews_per_sweep is deliberately allowed.
+	// It was rejected here at first, on the grounds that the extra candidates
+	// would prepare a worktree and then be turned away by the cap -- which was
+	// simply not true of the code in the same commit: the review slot is
+	// reserved before the clone, so a candidate over the cap is deferred
+	// having spent nothing. The two settings bound different things, a
+	// resource limit and a per-sweep budget, and the smaller one wins
+	// harmlessly. Rejecting the pair meant `status` and `doctor` refused to
+	// run at all for a configuration that would have worked.
 	if c.ReviewTimeout.D() <= 0 {
 		return errors.New("review_timeout must be positive")
 	}

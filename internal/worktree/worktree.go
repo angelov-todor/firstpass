@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/angelov-todor/firstpass/internal/prref"
 	"github.com/angelov-todor/firstpass/internal/runner"
@@ -46,10 +47,17 @@ type Manager struct {
 	// tests point it at a local fixture repository.
 	URLFor func(prref.PRRef) string
 
-	// mu guards mirrorLocks, which holds one mutex per mirror.
+	// mu guards mirrorGates, which holds one gate per mirror.
 	mu          sync.Mutex
-	mirrorLocks map[string]*sync.Mutex
+	mirrorGates map[string]chan struct{}
 }
+
+// cleanupLockWait bounds how long cleanup waits for the mirror before taking
+// the fallback path. The review is over by then, so the only thing waiting
+// longer would achieve is holding this worker's slot -- and its review slot,
+// since cleanup's defer runs before the slot is released -- while a sibling
+// finishes a clone that may take a quarter of an hour.
+const cleanupLockWait = 2 * time.Minute
 
 // mirrorLock returns the mutex guarding one mirror, creating it on first use.
 //
@@ -68,18 +76,59 @@ type Manager struct {
 // is held for the whole of Prepare, including the clone: a first clone of a
 // large repository is slow, but a second review of the same repository has
 // nothing to do until that clone exists anyway.
-func (m *Manager) mirrorLock(mirror string) *sync.Mutex {
+//
+// What the lock does NOT cover is a review already running out of the mirror.
+// Worktrees share the mirror's refs, so a sibling's fetch moves
+// refs/remotes/origin/* under a live checkout. Measured in a fixture: a
+// two-dot `git diff origin/main` inside a running worktree gained a file the
+// pull request never touched. The three-dot form the reviewer actually uses,
+// origin/main...HEAD, is immune, because the merge base stays at the branch
+// point. Closing the gap properly would mean a clone per pull request, or
+// holding the lock for the whole review and thereby serialising exactly the
+// same-repository case that is most worth parallelising. It is documented in
+// README instead.
+//
+// A gate rather than a sync.Mutex because the wait has to be interruptible;
+// see lockMirror.
+func (m *Manager) mirrorGate(mirror string) chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.mirrorLocks == nil {
-		m.mirrorLocks = map[string]*sync.Mutex{}
+	if m.mirrorGates == nil {
+		m.mirrorGates = map[string]chan struct{}{}
 	}
-	l, ok := m.mirrorLocks[mirror]
+	g, ok := m.mirrorGates[mirror]
 	if !ok {
-		l = &sync.Mutex{}
-		m.mirrorLocks[mirror] = l
+		g = make(chan struct{}, 1)
+		m.mirrorGates[mirror] = g
 	}
-	return l
+	return g
+}
+
+// lockMirror takes the mirror's gate, giving up if ctx ends first.
+//
+// sync.Mutex cannot do that, and the difference is not theoretical. handle
+// builds the CloneTimeout deadline before it calls Prepare, so a candidate
+// queued behind a cold clone spends its own clone budget waiting; on a
+// Mutex it would then keep waiting past its deadline, and only fail once it
+// got the lock and ran a git command against a context that had already
+// expired. Worse, a Ctrl-C would not free it: a worker parked on Lock() is
+// unreachable, so shutdown would wait out the clone.
+//
+// Giving up returns ctx.Err(), which handle defers and retries on a later
+// sweep -- and by then the clone this candidate was waiting for has finished,
+// so the retry is fast.
+func (m *Manager) lockMirror(ctx context.Context, mirror string) error {
+	gate := m.mirrorGate(mirror)
+	select {
+	case gate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *Manager) unlockMirror(mirror string) {
+	<-m.mirrorGate(mirror)
 }
 
 func New(r runner.Runner, git, reposDir, workDir string) *Manager {
@@ -108,9 +157,10 @@ func (m *Manager) Prepare(ctx context.Context, ref prref.PRRef) (string, func(),
 	mirror := m.mirrorPath(ref)
 	work := m.workPath(ref)
 
-	lock := m.mirrorLock(mirror)
-	lock.Lock()
-	defer lock.Unlock()
+	if err := m.lockMirror(ctx, mirror); err != nil {
+		return "", noop, fmt.Errorf("waiting for the mirror of %s: %w", ref.Key(), err)
+	}
+	defer m.unlockMirror(mirror)
 
 	for _, d := range []string{m.reposDir, m.workDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -165,18 +215,28 @@ func (m *Manager) Prepare(ctx context.Context, ref prref.PRRef) (string, func(),
 	}
 
 	cleanup := func() {
-		// The same mirror lock as Prepare: `worktree remove` rewrites the
+		// The same mirror gate as Prepare: `worktree remove` rewrites the
 		// mirror's worktree registrations, so a review finishing must not run
 		// it while a sibling review of the same repository is inside Prepare.
-		// It is taken here rather than held from Prepare because cleanup runs
-		// after the review, which is the whole half-hour this lock must not
-		// span.
-		lock := m.mirrorLock(mirror)
-		lock.Lock()
-		defer lock.Unlock()
+		// Taken here rather than held from Prepare because cleanup runs after
+		// the review, which is the half-hour this lock must not span.
+		//
+		// context.Background for the git call: cleanup must still run when the
+		// review's own deadline has already fired, or the worktree leaks.
+		lockCtx, cancel := context.WithTimeout(context.Background(), cleanupLockWait)
+		defer cancel()
+		if err := m.lockMirror(lockCtx, mirror); err != nil {
+			// A sibling is holding the mirror -- cloning, most likely. Remove
+			// the checkout anyway, because leaving it behind is what wedges
+			// the next review of this pull request, and let the next Prepare's
+			// `worktree prune` drop the stale registration. That recovery path
+			// already exists and is tested; see
+			// TestPrepareRecoversFromALeftoverWorktree.
+			_ = os.RemoveAll(work)
+			return
+		}
+		defer m.unlockMirror(mirror)
 
-		// context.Background: cleanup must still run when the review's deadline
-		// has already fired, or the worktree leaks.
 		_ = m.git0(context.Background(), "-C", mirror, "worktree", "remove", "--force", work)
 		_ = os.RemoveAll(work)
 	}

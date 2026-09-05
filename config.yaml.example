@@ -99,7 +99,9 @@ max_reviews_per_sweep: 3
 # session and they share one account's rate limits, so a high number tends to
 # buy queueing rather than throughput. Try 3 before trying more.
 #
-# Must not exceed max_reviews_per_sweep.
+# Setting this above max_reviews_per_sweep is allowed and simply has no
+# effect beyond the cap: the extra candidates are deferred to the next sweep
+# without doing any work.
 # Default: 1
 review_concurrency: 1
 

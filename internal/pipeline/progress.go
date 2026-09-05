@@ -60,9 +60,9 @@ type Event struct {
 	Detail string
 }
 
-// progress calls the hook if one is set. Every call site in this package
-// goes through it, so a nil Progress is free and cannot panic.
-// progress delivers one event to the hook, one caller at a time.
+// progress delivers one event to the hook, one caller at a time. Every call
+// site in this package goes through it, so a nil Progress is free and cannot
+// panic.
 //
 // Reviews run concurrently, so this is reached from several goroutines. The
 // lock is here rather than in the hook because the hook is supplied by the

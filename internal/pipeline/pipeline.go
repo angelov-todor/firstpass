@@ -354,22 +354,9 @@ type Pipeline struct {
 	// dry run and in print-only mode.
 	React Reactor
 
-	// reactionMu serialises the reaction bookkeeping. Both reaction stages
-	// read a message record, decide from it, and write it back, and both are
-	// reached from handle -- so two pull requests posted in one message, which
-	// is the ordinary case, run them concurrently. Without this each stage is
-	// a lost update: both candidates read WatchApplied false, both set it,
-	// both write, and the message gets two 👀 reactions. The store's latch is
-	// what makes an outward act happen at most once, and a latch behind a
-	// read-modify-write is only a latch if the sequence is atomic.
-	//
-	// Held across the chat calls as well as the store writes, which is the
-	// simpler of the two available designs and the one less likely to be
-	// subtly wrong. It costs a reaction call waiting on another reaction call,
-	// bounded by chat_timeout, against reviews that take minutes; releasing
-	// the lock around the call would mean writing back a record another
-	// goroutine may have changed in the meantime.
-	reactionMu sync.Mutex
+	// reactionMu guards reactionLocks, which holds one mutex per chat message.
+	mu            sync.Mutex
+	reactionLocks map[string]*sync.Mutex
 
 	// Progress, when non-nil, is called as a sweep proceeds so a caller can
 	// show the operator that a long review is working rather than wedged. It

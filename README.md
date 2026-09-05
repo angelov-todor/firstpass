@@ -278,9 +278,9 @@ By default reviews are serial: one pull request is reviewed to completion
 before the next starts. Three posted at once, at roughly 12 minutes each, is
 therefore about 36 minutes before the last one is done.
 
-`review_concurrency` raises that. It must not exceed `max_reviews_per_sweep`,
-and the default is `1` so an upgrade never makes firstpass do more at once
-than the operator asked for.
+`review_concurrency` raises that. The default is `1`, so an upgrade never
+makes firstpass do more at once than the operator asked for. Setting it above
+`max_reviews_per_sweep` is allowed and just has no effect beyond the cap.
 
 ```yaml
 max_reviews_per_sweep: 3
@@ -302,10 +302,19 @@ Two things worth knowing before raising it:
   three reviews in flight that is three of them. Stop the daemon between
   sweeps where you can.
 
-A repository is never touched by two reviews at once: worktrees are per pull
-request, but the bare mirror behind them is per repository, so `Prepare` takes
-a per-repository lock. Two pull requests from the same service queue for the
-clone and then review in parallel.
+Worktrees are per pull request, but the bare mirror behind them is per
+repository, so `Prepare` takes a per-repository lock: two pull requests from
+the same service queue for the clone and fetch, then review in parallel.
+
+That lock covers checkout setup, not the reviews themselves. Worktrees share
+the mirror's refs, so while one review is running, a sibling's fetch does move
+`refs/remotes/origin/*` under it. Measured: a two-dot `git diff origin/main`
+inside a live worktree grew a file the pull request never touched. A three-dot
+`origin/main...HEAD` — which is what the reviewer actually uses — is immune,
+because the merge base stays at the branch point. Making this airtight would
+mean either a clone per pull request or serialising same-repository reviews,
+which is the case worth parallelising most, so it is documented rather than
+locked.
 
 ## Tests
 
