@@ -1,0 +1,32 @@
+# Test container: runs the suite under the Go race detector.
+#
+# The race detector needs cgo and a working C toolchain. On the Windows
+# development machine `gcc` is present but broken (missing cc1.exe), so
+# `go test -race` cannot run there at all -- which is how the heartbeat
+# goroutine in cmd/firstpass/progress.go shipped verified by reasoning rather
+# than by a detector. A Linux container has the toolchain, so the detector is
+# one `docker run` away rather than a machine-setup project.
+#
+# Usage: scripts/test-race.sh  (or see that script for the raw docker commands)
+
+FROM golang:1.24-bookworm
+
+# internal/worktree and internal/pipeline drive a real `git` in their fixtures.
+# It is already in this image; asserting it here makes a future base-image
+# change fail loudly at build time instead of as a confusing test failure.
+RUN git --version
+
+# Warm the module cache in its own layer so a source change does not re-download
+# dependencies. The source itself is bind-mounted at run time, not copied, so
+# there is never a stale copy of the code baked into the image.
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+# The suite makes real commits in fixtures. Git refuses to commit without an
+# identity, and the container has no global config; the fixtures set their own
+# user.email/user.name per repository, so nothing is needed here. This comment
+# exists so the next person does not "fix" that by adding a global identity,
+# which would mask a fixture that forgot to set one.
+
+CMD ["go", "test", "-race", "./..."]

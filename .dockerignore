@@ -1,0 +1,9 @@
+# Keep the build context small and free of anything local or secret.
+.git
+.superpowers
+*.exe
+*.db
+/reports/
+/dist/
+docs/
+config.yaml
