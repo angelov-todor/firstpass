@@ -20,16 +20,17 @@ const prevSHA = "0123456789abcdef0123456789abcdef01234567"
 
 func fakeWithReply(stdout string) *runner.Fake {
 	return &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{Stdout: []byte(stdout)}},
+		{Match: "Review pull request", Result: runner.Result{Stdout: []byte(stdout)}},
 	}}
 }
 
 // The note travels as --append-system-prompt, never inside the -p value.
-// Everything after "/code-review" there becomes the slash command's
-// $ARGUMENTS, which parses an effort level, a --comment flag and a target: a
-// paragraph of prose appended there is at best dropped, and at worst perturbs
-// the target parsing -- and firstpass would not find out until it silently
-// failed in production.
+//
+// The original reason was that the -p value was a slash command whose
+// arguments might be parsed for flags. The command is gone, and the rule
+// stands on its own merits: the note is a paragraph about history rather than
+// about the task, and burying the verdict ask behind it is exactly what stops
+// the ask from being the last thing the reviewer is told.
 //
 // Asserted on ordered argv, not by substring presence, because "-p" must be
 // immediately followed by the whole prompt and nothing else.

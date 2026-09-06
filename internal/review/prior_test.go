@@ -37,7 +37,7 @@ func samplePrior() *PriorFeedback {
 // is a slash command's arguments.
 func TestTheAskAndTheEvidenceTravelInDifferentChannels(t *testing.T) {
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{Stdout: []byte("done")}},
+		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("done")}},
 	}}
 	rr := New(f, "claude", nil, false, t.TempDir())
 
@@ -132,7 +132,7 @@ func TestNoFeedbackMeansNoNoteAndNoClause(t *testing.T) {
 // untouched for the common case.
 func TestAPullRequestWithNoFeedbackAsksExactlyWhatItAlwaysDid(t *testing.T) {
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{Stdout: []byte("done")}},
+		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("done")}},
 	}}
 	rr := New(f, "claude", nil, false, t.TempDir())
 	if _, err := rr.Run(t.Context(), "work", ref, nil, &PriorFeedback{}); err != nil {

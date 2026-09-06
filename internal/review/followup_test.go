@@ -30,7 +30,7 @@ func blockedReportsDir(t *testing.T) string {
 // be reported as a review that was killed with comments possibly half-posted.
 func TestDryRunReportWriteFailureIsDistinguishableFromAReviewFailure(t *testing.T) {
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{Stdout: []byte("finding: off-by-one")}},
+		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("finding: off-by-one")}},
 	}}
 	rr := New(f, "claude", nil, true, blockedReportsDir(t))
 
@@ -59,11 +59,11 @@ func TestReviewFailureIsNotAReportError(t *testing.T) {
 		dry   bool
 	}{
 		{"non-zero exit, dry run", runner.Reply{
-			Match: "code-review", Result: runner.Result{ExitCode: 1, Stderr: []byte("rate limited")}}, true},
+			Match: "Review pull request", Result: runner.Result{ExitCode: 1, Stderr: []byte("rate limited")}}, true},
 		{"non-zero exit, live", runner.Reply{
-			Match: "code-review", Result: runner.Result{ExitCode: 1, Stderr: []byte("rate limited")}}, false},
-		{"killed, dry run", runner.Reply{Match: "code-review", Err: context.DeadlineExceeded}, true},
-		{"killed, live", runner.Reply{Match: "code-review", Err: context.DeadlineExceeded}, false},
+			Match: "Review pull request", Result: runner.Result{ExitCode: 1, Stderr: []byte("rate limited")}}, false},
+		{"killed, dry run", runner.Reply{Match: "Review pull request", Err: context.DeadlineExceeded}, true},
+		{"killed, live", runner.Reply{Match: "Review pull request", Err: context.DeadlineExceeded}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &runner.Fake{Replies: []runner.Reply{tc.reply}}
@@ -87,7 +87,7 @@ func TestReviewFailureIsNotAReportError(t *testing.T) {
 func TestDryRunWithNonZeroExitStillWritesAReport(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{
+		{Match: "Review pull request", Result: runner.Result{
 			ExitCode: 2,
 			Stdout:   []byte("finding: unchecked error\nthen claude gave up"),
 			Stderr:   []byte("rate limited"),
@@ -118,7 +118,7 @@ func TestDryRunWithNonZeroExitStillWritesAReport(t *testing.T) {
 func TestDryRunWithNoOutputStillWritesAReportNamingTheFailure(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Err: context.DeadlineExceeded},
+		{Match: "Review pull request", Err: context.DeadlineExceeded},
 	}}
 	rr := New(f, "claude", nil, true, dir)
 
@@ -151,7 +151,7 @@ func TestDryRunWithNoOutputStillWritesAReportNamingTheFailure(t *testing.T) {
 func TestALiveFailureKeepsWhatItPrinted(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{
+		{Match: "Review pull request", Result: runner.Result{
 			ExitCode: 1,
 			Stdout:   []byte("half a review"),
 			Stderr:   []byte("usage limit reached"),
@@ -195,7 +195,7 @@ func TestALiveFailureKeepsWhatItPrinted(t *testing.T) {
 func TestALiveReportDoesNotClaimNothingWasPosted(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{Stdout: []byte("a review with no verdict line")}},
+		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("a review with no verdict line")}},
 	}}
 	rr := New(f, "claude", nil, false, dir)
 

@@ -166,6 +166,29 @@ claude_args:
   - --permission-mode
   - bypassPermissions
 
+# Path to a checkout of the project's specification and compliance
+# documentation. Optional: left unset, reviews say nothing about compliance and
+# nothing else changes.
+#
+# When set, the reviewer is told where the material is and asked to check any
+# change that touches behaviour a business spec or regulation may govern -
+# endpoints, fields, thresholds, denial rules, status transitions, events, or
+# anything in margin/futures/liquidation/fee/interest/KYC/withdrawal/
+# surveillance/position-limit.
+#
+# It is a path, not a copy: the compliance books alone run to around 700,000
+# words, roughly five context windows, so the reviewer searches them rather
+# than reading them. `doctor` checks the path exists when it is set, because a
+# wrong path produces reviews that look exactly like reviews with nothing to
+# say about compliance.
+#
+# A compliance finding must cite the document and section it rests on, and the
+# reviewer is told not to raise one it cannot cite: a regulatory claim that
+# turns out to be invented, posted under your GitHub identity on a colleague's
+# pull request, costs more than the finding was worth.
+# Default: "" (no compliance dimension)
+docs_root: ""
+
 # Where firstpass keeps its database, bare mirrors, worktrees and reports.
 # Must be an absolute path.
 #

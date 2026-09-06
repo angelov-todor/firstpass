@@ -78,8 +78,16 @@ type Config struct {
 	AllowOwners        []string `yaml:"allow_owners"`
 	DenyRepos          []string `yaml:"deny_repos"`
 	ClaudeArgs         []string `yaml:"claude_args"`
-	StateDir           string   `yaml:"state_dir"`
-	Paths              Paths    `yaml:"paths"`
+	// DocsRoot is the checkout of the project's specification and compliance
+	// documentation. Left empty, reviews say nothing about compliance and
+	// nothing else changes.
+	//
+	// It is a path rather than a copy because the material is far too large to
+	// travel in a prompt: the compliance books alone are about 700,000 words,
+	// roughly five context windows. The reviewer searches them.
+	DocsRoot string `yaml:"docs_root"`
+	StateDir string `yaml:"state_dir"`
+	Paths    Paths  `yaml:"paths"`
 }
 
 // Default is the shipped configuration: safe, but not yet usable. Space,

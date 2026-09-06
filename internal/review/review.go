@@ -90,6 +90,10 @@ type Runner struct {
 	extraArgs  []string
 	dryRun     bool
 	reportsDir string
+	// docsRoot is the specification and compliance checkout, or empty. Empty
+	// means reviews say nothing about compliance and the system prompt is
+	// exactly what it was before this existed.
+	docsRoot string
 }
 
 // New builds a review runner. extraArgs comes from config and normally carries
@@ -98,6 +102,17 @@ type Runner struct {
 // answer.
 func New(r runner.Runner, claude string, extraArgs []string, dryRun bool, reportsDir string) *Runner {
 	return &Runner{r: r, claude: claude, extraArgs: extraArgs, dryRun: dryRun, reportsDir: reportsDir}
+}
+
+// WithDocs points the reviewer at the specification and compliance checkout.
+//
+// A setter rather than another New parameter, so every existing caller and
+// every existing test keeps working unchanged -- which is what makes "a review
+// with no docs configured is byte-identical to the review firstpass did
+// before" a property a test can assert rather than a claim.
+func (rr *Runner) WithDocs(root string) *Runner {
+	rr.docsRoot = root
+	return rr
 }
 
 // promptVerdictAsk is the verdict requirement as it appears in the -p value,
@@ -160,9 +175,19 @@ const promptVerdictAsk = "\n\nWhen the review is complete, print exactly one of 
 // been exercised against real claude is still exactly what is asked; see
 // promptVerdictAsk for why the verdict requirement is repeated here.
 func (rr *Runner) Prompt(ref prref.PRRef) string {
-	p := "/code-review " + ref.URL()
-	if !rr.dryRun {
-		p += " --comment"
+	p := "Review pull request " + ref.URL() + " for correctness, performance, security and " +
+		"maintainability. Read the change and whatever context you need to judge it."
+	if rr.dryRun {
+		// Said outright rather than left to a flag. Under /code-review, dry run
+		// was expressed by withholding --comment -- a flag that command never
+		// reads, since it references $ARGUMENTS nowhere. So the only thing
+		// keeping a dry run quiet was that the reviewer happened not to post.
+		// Now it is an instruction firstpass gives and can test.
+		p += " Do NOT post anything to GitHub: no comments, no review, nothing. " +
+			"Report your findings in your output instead."
+	} else {
+		p += " Post each finding as an inline comment on the pull request, on the line it " +
+			"concerns, using gh."
 	}
 	return p + promptVerdictAsk
 }
@@ -398,6 +423,13 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 	// ask. Splitting them that way is not tidiness -- it is what this project
 	// measured: an instruction in the system prompt is not reliably followed
 	// over a long agentic run, while data there is simply available.
+	// Ordered deliberately: what governs this code, then what has already been
+	// said about this change. The docs note is stable across every review in a
+	// repository; the prior-feedback index changes per pull request and per
+	// pass. Stable material first keeps the prompt prefix cacheable.
+	if note := docsNote(rr.docsRoot); note != "" {
+		system += "\n\n" + note
+	}
 	if note := priorNote(prior); note != "" {
 		system += "\n\n" + note
 	}
