@@ -47,8 +47,16 @@ func TestPromptNamesThePRAndIncludesCommentWhenLive(t *testing.T) {
 	// that reviews .NET changes produces a report and posts nothing at all --
 	// which the old slash command did do, and is why the instruction had to
 	// become explicit when the command went away.
-	if !strings.Contains(got, "Post each finding as an inline comment") {
+	//
+	// One comment, not one per line, at the owner's request -- and the more
+	// robust of the two, since a per-line comment needs a path, a line and a
+	// diff position that still resolves, while a single comment carries each
+	// finding's location in its text and cannot fail to anchor.
+	if !strings.Contains(got, "ONE comment on the pull request") {
 		t.Errorf("Prompt() = %q; a live review must be told to post its findings", got)
+	}
+	if strings.Contains(got, "inline comment on the pull request, on the line") {
+		t.Errorf("Prompt() = %q; per-line comments were dropped deliberately", got)
 	}
 	if strings.Contains(got, "Do NOT post") {
 		t.Errorf("Prompt() = %q; a live review must not be told to stay quiet", got)

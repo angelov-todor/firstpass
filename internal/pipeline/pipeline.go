@@ -93,82 +93,81 @@ const inFlightReason = "previous run died mid-review"
 // zero would read as a clean success in `firstpass status`.
 const ExitUnknown = -1
 
-// firstpassURL goes in every verdict body, so a colleague who finds one of
-// these reviews on their pull request can see what produced it.
-const firstpassURL = "https://github.com/angelov-todor/firstpass"
+// The verdict bodies.
+//
+// Deliberately short. Every one of them is a comment on somebody else's pull
+// request, and a paragraph of boilerplate above the actual point is how a
+// reader learns to skip the whole thing. Three earlier versions carried a
+// pass number, a link back to this repository and two sentences of
+// disclaimer; the owner asked for none of it.
+//
+// What stays is the one thing a reader cannot work out for themselves: that a
+// machine wrote this and it is not a human review. It is submitted under the
+// operator's own GitHub identity, so without that sentence a colleague has no
+// way to tell.
+//
+// What also stays, on a later pass, is the scope sentence -- see
+// verdictScopeLater. It is not framing; it is the difference between "this
+// change is fine" and "the newest commits are fine".
+const machineWritten = "Automated review — machine-written, not a human review."
 
-// The verdict bodies. They open by saying they are machine-written because
-// they are submitted under the operator's own GitHub identity, and a colleague
-// reading one has no other way to tell.
+// verdictScopeLater is kept for later passes and nothing else.
 //
-// They are built per pass rather than fixed, because "first pass" stopped
-// being true the moment re-reviews shipped. Production has already produced
-// passes 2, 3 and 5, and only the fact that no verdict was ever submitted
-// kept "Automated first pass" off a colleague's pull request for the fifth
-// review of it.
-//
-// The scope sentence on a later pass is the part that matters most. A second
-// pass is asked to concentrate on the commits added since the last one and
-// explicitly not to restate earlier findings, so an approval on pass 2 means
-// "the new commits raised nothing", NOT "this pull request is fine". Those two
-// readings differ exactly when it counts: when an earlier pass raised findings
-// the author has not addressed. Saying which one is meant is the difference
-// between an honest approval and one that reads as a blessing of the whole
-// change.
-const verdictScopeLater = "This pass reviewed the commits added since the previous automated " +
-	"pass, and was asked not to restate findings from it — so any findings from earlier " +
-	"passes still stand on their own and may be unaddressed."
+// A later pass is asked to concentrate on the commits added since the last one
+// and explicitly not to restate earlier findings, so an approval on pass 2
+// means "the new commits raised nothing", NOT "this pull request is fine".
+// Those readings come apart exactly when it counts: when an earlier pass
+// raised findings the author has not addressed.
+const verdictScopeLater = "This pass covered the commits added since the previous automated " +
+	"pass and did not restate its findings, so earlier findings may still be open."
 
 func verdictBodyApprove(pass int) string {
 	if pass > 1 {
-		return fmt.Sprintf("Automated pass %d by firstpass — no findings. "+
-			"This is machine-written, not a human review.\n\n"+
-			"firstpass ran a Claude Code review and raised nothing needing a change. %s\n\n%s",
-			pass, verdictScopeLater, firstpassURL)
+		return machineWritten + " No findings needing a change.\n\n" + verdictScopeLater
 	}
-	return "Automated first pass by firstpass — no findings. " +
-		"This is machine-written, not a human review.\n\n" +
-		"firstpass ran a Claude Code review over this pull request and raised nothing " +
-		"needing a change.\n\n" + firstpassURL
+	return machineWritten + " No findings needing a change."
 }
 
-// "posted as inline comments on this pull request", not "on this review":
-// /code-review posts each inline comment as its own review event, so the
-// comments do not hang off this review at all. Saying they did would be false
-// to any colleague who went looking for them here.
-// verdictBodyFindings is submitted when the reviewer raised something.
+// verdictBodyFindings is submitted when the reviewer raised something blocking
+// or important. Suggestions alone are an approval.
 //
 // posted says whether firstpass confirmed the findings actually reached the
 // pull request, and the body says only what is true of the run it describes.
-// It used to assert "the findings are posted as inline comments on this pull
-// request" unconditionally, which was safe while the slash command did the
-// posting and became a claim that could be false the moment posting turned
-// into an instruction in the prompt: the skills a general prompt selects do
-// not all post, and the .NET review skill reports and posts nothing.
+// It used to assert that the findings were posted, which was safe while the
+// slash command did the posting and became a claim that could be false the
+// moment posting turned into an instruction in the prompt: the skills a
+// general prompt selects do not all post.
 //
-// Where the hedge lands matters. A colleague reading this needs to know
-// whether to go looking for inline comments; sending them to hunt for comments
-// that were never posted wastes their time and makes the tool look broken,
-// which is a worse outcome than admitting firstpass could not confirm it.
+// Where the hedge lands matters. A reader needs to know whether to go looking
+// for the findings; sending them hunting for a comment that was never posted
+// wastes their time and makes the tool look broken, which is worse than
+// admitting firstpass could not confirm it.
 func verdictBodyFindings(pass int, posted bool) string {
-	where := "The findings are posted as inline comments on this pull request."
+	b := machineWritten + " Findings are posted in a comment on this pull request."
 	if !posted {
-		where = "firstpass could not confirm that the findings were posted as inline comments " +
-			"here. If you cannot see them on the diff, they were reported to firstpass instead " +
-			"of posted, and they are in its report on the operator's machine — ask them for it " +
+		b = machineWritten + " Findings were raised, but firstpass could not confirm they " +
+			"were posted here. If you cannot see them, ask the operator for the review report " +
 			"rather than assuming the review found nothing."
 	}
-	which := "Automated first pass"
-	scope := ""
+	b += " This is a comment rather than a request for changes, so the pull request stays in " +
+		"the team's review queue."
 	if pass > 1 {
-		which = fmt.Sprintf("Automated pass %d", pass)
-		scope = " " + verdictScopeLater
+		b += "\n\n" + verdictScopeLater
 	}
-	return fmt.Sprintf("%s by firstpass — findings raised. "+
-		"This is machine-written and is not a substitute for human review.\n\n"+
-		"%s This is deliberately a comment rather than a request for changes, so the pull "+
-		"request stays in the team's human review queue.%s\n\n%s",
-		which, where, scope, firstpassURL)
+	return b
+}
+
+// verdictBodyWithheld is submitted when the reviewer decided approve and
+// firstpass declined to turn that into an approving review. It says so
+// plainly rather than dressing it up as findings: the review found nothing to
+// change, and it is deliberately not approving anyway.
+func verdictBodyWithheld(pass int, reason string) string {
+	b := machineWritten + " No findings needing a change, but no approval submitted: " +
+		reason + "."
+	if pass > 1 {
+		b += "\n\n" + verdictScopeLater
+	}
+	return b
 }
 
 // ownFeedbackCount counts the items on a pull request authored by the
@@ -229,24 +228,6 @@ func toPriorFeedback(f ghpr.Feedback) *review.PriorFeedback {
 		})
 	}
 	return p
-}
-
-// verdictBodyWithheld is submitted when the reviewer decided approve and
-// firstpass declined to turn that into an approving review.
-//
-// It says so plainly rather than dressing it up as findings. A colleague
-// reading it needs to know two things that are both true and neither obvious:
-// the automated review found nothing to change, and it is deliberately not
-// approving anyway.
-func verdictBodyWithheld(pass int, reason string) string {
-	which := "Automated first pass"
-	if pass > 1 {
-		which = fmt.Sprintf("Automated pass %d", pass)
-	}
-	return fmt.Sprintf("%s by firstpass — no findings, approval withheld. "+
-		"This is machine-written, not a human review.\n\n"+
-		"firstpass ran a Claude Code review and raised nothing needing a change, but it did "+
-		"not submit an approval because %s.\n\n%s", which, reason, firstpassURL)
 }
 
 // noVerdictDetail is recorded when a review finished but printed no verdict

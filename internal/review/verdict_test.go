@@ -130,12 +130,26 @@ func TestVerdictInstructionStatesTheProtocolAndTheSeverityRule(t *testing.T) {
 		"FIRSTPASS-VERDICT: approve",
 		"FIRSTPASS-VERDICT: findings",
 		"last line of your output",
-		"Critical or Important",
+		// The severity rule, in the taxonomy the prompt now asks for and the
+		// .NET review skill already uses. "Critical or Important" stood here
+		// before and left the boundary to interpretation; the owner's rule is
+		// that only blocking or important withholds an approval, and nits do
+		// not.
+		"blocking or important",
 		"nits",
 	} {
 		if !strings.Contains(verdictInstruction, want) {
 			t.Errorf("the verdict instruction is missing %q:\n%s", want, verdictInstruction)
 		}
+	}
+	// And the rule must be stated as a restriction, not a suggestion: a
+	// reviewer that reads "print findings if you raised anything" will withhold
+	// approval for a style nit, which is exactly what the owner asked to stop.
+	if !strings.Contains(verdictInstruction, "only if") {
+		t.Errorf("the rule must bound when findings is correct:\n%s", verdictInstruction)
+	}
+	if !strings.Contains(verdictInstruction, "do not withhold an approval") {
+		t.Errorf("the instruction must say plainly that nits do not block:\n%s", verdictInstruction)
 	}
 }
 

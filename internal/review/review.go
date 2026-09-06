@@ -152,9 +152,11 @@ const promptVerdictAsk = "\n\nWhen the review is complete, print exactly one of 
 	"verbatim, as the very last line of your output:\n" +
 	VerdictMarker + " approve\n" +
 	VerdictMarker + " findings\n" +
-	"Print `findings` if the review raised anything Critical or Important, and `approve` if it " +
-	"raised nothing or only minor nits. This line is the only thing firstpass can see about what " +
-	"you found.\n" +
+	"Print `findings` ONLY if the review raised something **blocking** or **important**. Print " +
+	"`approve` if it raised nothing at all, or only **suggestion**-level points: nits, style and " +
+	"nice-to-haves do not withhold an approval, and a pull request whose every finding is a " +
+	"suggestion is an approval with those suggestions posted alongside it. This line is the only " +
+	"thing firstpass can see about what you found.\n" +
 	// ParseVerdict takes the *last* marked line, so this constraint is not
 	// politeness: a recap or a sentence quoting the marker after the real
 	// verdict is read as the verdict. "findings" followed by prose mentioning
@@ -163,6 +165,29 @@ const promptVerdictAsk = "\n\nWhen the review is complete, print exactly one of 
 	// exists to prevent. The system prompt has said this all along, and this
 	// commit is the evidence that the system prompt alone is not obeyed.
 	"Print nothing at all after that line, and no other line beginning with " + VerdictMarker
+
+// findingFormat asks for one severity label per finding, and it is the fix for
+// reviews that "still look the old way".
+//
+// Skill selection was supposed to supply the shape: a general prompt loads a
+// .NET review skill on its own, and that skill mandates a structure. Measured
+// in a small fixture, it does exactly that. Measured in a real service
+// repository, it does not -- the first live review under the general prompt
+// loaded no skill at all, because that repository carries an 859-line
+// CLAUDE.md and the model reviews directly from it rather than reaching for a
+// generic checklist. The review was good; it simply had no severity labels.
+//
+// So the shape is asked for here rather than inherited from whichever skill
+// happens to load. That also makes the verdict rule checkable: "only minor
+// things were found" is a judgement about severities, and firstpass cannot see
+// findings -- it can only see the verdict line the severities are supposed to
+// produce.
+//
+// The taxonomy is the one the .NET skill already uses, so a review that does
+// load it needs no translation.
+const findingFormat = " Label every finding with exactly one severity: **blocking**, " +
+	"**important**, or **suggestion**. `suggestion` is for nits, style and " +
+	"nice-to-haves -- things a senior engineer would mention but not hold a merge for."
 
 // The two posting clauses, and the only thing that differs between a dry run
 // and a live one.
@@ -192,8 +217,16 @@ const (
 	// Live has to be told to post, which the slash command used to handle. It
 	// cannot be assumed: the skill that reviews .NET changes produces a report
 	// and posts nothing at all.
-	livePostingClause = " Post each finding as an inline comment on the pull request, on the " +
-		"line it concerns, using gh."
+	//
+	// One comment on the pull request, not one per line. That is the owner's
+	// call, and it is also the more robust of the two: a per-line comment needs
+	// a path, a line number and a diff position that still resolves, and a
+	// review whose anchors have drifted posts nothing or posts in the wrong
+	// place. A single comment carries every finding with its own file and line
+	// written in the text, which cannot fail to anchor.
+	livePostingClause = " Post your findings as ONE comment on the pull request with `gh pr " +
+		"comment`, each finding naming its file and line. Do not post per-line inline comments " +
+		"and do not submit a GitHub review: firstpass submits the review itself."
 )
 
 // Prompt is what claude is asked to do: a general instruction naming the pull
@@ -222,7 +255,9 @@ const (
 // promptVerdictAsk for why the verdict requirement is repeated here.
 func (rr *Runner) Prompt(ref prref.PRRef) string {
 	p := "Review pull request " + ref.URL() + " for correctness, performance, security and " +
-		"maintainability. Read the change and whatever context you need to judge it."
+		"maintainability. Read the change and whatever context you need to judge it. Use " +
+		"whichever installed review skills apply to this repository." +
+		findingFormat
 	if rr.dryRun {
 		p += dryRunPostingClause
 	} else {
@@ -267,9 +302,10 @@ const verdictInstruction = "You are running as firstpass: an automated review pa
 	"last line of your output:\n" +
 	VerdictMarker + " approve\n" +
 	VerdictMarker + " findings\n\n" +
-	"Print `findings` if the review raised anything Critical or Important. Print `approve` if " +
-	"the review raised nothing at all, or only minor nits. Print nothing after that line, and " +
-	"no other line starting with " + VerdictMarker + "\n\n" +
+	"Print `findings` only if the review raised something blocking or important. Print `approve` " +
+	"if it raised nothing at all, or only suggestion-level points -- nits, style and " +
+	"nice-to-haves do not withhold an approval. Print nothing after that line, and no other " +
+	"line starting with " + VerdictMarker + "\n\n" +
 	"firstpass reads that line to decide whether to submit an approving review on the pull " +
 	"request or to leave it in the team's human review queue. It is the only thing firstpass " +
 	"can see about what you found: if the line is missing or reworded, firstpass submits no " +

@@ -33,11 +33,23 @@ One sweep, on a ticker or on demand:
    The prompt is a general instruction rather than a slash command, and that
    is deliberate. A command's own procedure crowds out the reviewer's skills;
    a general instruction lets them be selected for the repository being
-   reviewed. Measured: in a C# repo, a general review prompt loads
-   `dotnet-techne-code-review` on its own and produces findings with a
-   severity taxonomy of blocking / important / suggestion — which maps onto
-   firstpass's own rule that mandatory points block an approval and nits do
-   not.
+   reviewed. Measured: in a C# fixture, a general review prompt loads
+   `dotnet-techne-code-review` on its own.
+
+   It does not always, though, and firstpass no longer depends on it. The
+   first live review under the general prompt loaded no skill at all — that
+   service repository carries an 859-line `CLAUDE.md`, and the model reviewed
+   directly from it rather than reaching for a generic checklist. The review
+   was good and simply had no severity labels. So the prompt asks for the
+   shape it needs: **one severity per finding — blocking, important or
+   suggestion**. That is also what makes the verdict rule checkable, since
+   firstpass never sees a finding.
+
+   Live, the reviewer posts its findings as **one comment** on the PR, each
+   finding naming its file and line — not one comment per line. A per-line
+   comment needs a path, a line and a diff position that still resolves; a
+   single comment carries each location in its text and cannot fail to
+   anchor.
 
    The duplication is not belt-and-braces for its own sake. The system prompt
    alone did not work: fourteen consecutive production reviews finished,
@@ -59,13 +71,21 @@ One sweep, on a ticker or on demand:
 7. Submit that verdict as a GitHub review, so a reviewed PR is never silent —
    a clean one used to produce nothing at all, indistinguishable from the tool
    never having run. Nothing needing change (no findings, or only minor nits)
-   is an **approval**, posted under your own GitHub identity. Anything
-   Critical or Important is a **comment** review, deliberately not
+   is an **approval**, posted under your own GitHub identity. Only a
+   **blocking** or **important** finding withholds one: nits, style and
+   nice-to-haves are posted alongside an approval rather than blocking it.
+   Anything blocking or important becomes a **comment** review, deliberately not
    request-changes: a comment leaves `reviewDecision` at `REVIEW_REQUIRED`, so
    the PR stays in the team's human review queue, whereas an approval would
-   take it out. Every verdict body says in its first sentence that it is
-   machine-written. A dry run submits nothing and its report says what the
-   verdict would have been.
+   take it out. A dry run submits nothing and its report says what the verdict
+   would have been.
+
+   The bodies are deliberately short: one sentence saying a machine wrote
+   this, one saying what it found. No pass number, no link back to this
+   repository, no second disclaimer — every one of them is a comment on
+   somebody else's pull request, and boilerplate above the point is how a
+   reader learns to skip the whole thing. The exception is a later pass, which
+   adds one sentence saying it covered only the newest commits.
 
    **An approval covers the whole pull request.** Before the review runs,
    firstpass enumerates every piece of feedback already on the PR — unresolved
