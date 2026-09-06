@@ -1,11 +1,17 @@
 # firstpass
 
-A machine first pass over a PR before a human looks.
+A machine pass over a PR ahead of human review — and again when it changes.
 
 `firstpass` is a Go daemon for Windows that watches a Google Chat space for
 posted GitHub pull request links and, for each newly posted PR, runs a
 [Claude Code](https://claude.com/product/claude-code) review in an isolated
 git worktree and posts the findings as inline comments on the PR.
+
+The name is about position, not count: each pass is the first automated look
+at the commits it reviews, ahead of a human. A re-posted PR with new commits
+gets another pass (see [Second pass](#second-pass)), and the review it submits
+says which pass it is — an approval on a later pass covers the new commits,
+not the whole change.
 
 ## How it works
 

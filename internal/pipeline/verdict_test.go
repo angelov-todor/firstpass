@@ -13,6 +13,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -90,7 +91,7 @@ func TestLiveApproveVerdictSubmitsAnApprovingReview(t *testing.T) {
 		t.Errorf("Name = %q, want gh", calls[0].Name)
 	}
 	want := []string{"pr", "review", "12", "--repo", "example-org/aex-balances",
-		"--approve", "--body", verdictBodyApprove}
+		"--approve", "--body", verdictBodyApprove(1)}
 	if !slices.Equal(calls[0].Args, want) {
 		t.Errorf("Args = %q,\nwant %q", calls[0].Args, want)
 	}
@@ -118,7 +119,7 @@ func TestLiveFindingsVerdictSubmitsACommentReview(t *testing.T) {
 		t.Fatalf("want exactly one gh pr review call, got %+v", calls)
 	}
 	want := []string{"pr", "review", "12", "--repo", "example-org/aex-balances",
-		"--comment", "--body", verdictBodyFindings}
+		"--comment", "--body", verdictBodyFindings(1)}
 	if !slices.Equal(calls[0].Args, want) {
 		t.Errorf("Args = %q,\nwant %q", calls[0].Args, want)
 	}
@@ -145,9 +146,9 @@ func TestVerdictBodiesSayTheyAreMachineWritten(t *testing.T) {
 		body  string
 		first string
 	}{
-		{"approve", verdictBodyApprove,
+		{"approve", verdictBodyApprove(1),
 			"Automated first pass by firstpass — no findings. This is machine-written, not a human review."},
-		{"findings", verdictBodyFindings,
+		{"findings", verdictBodyFindings(1),
 			"Automated first pass by firstpass — findings posted inline. This is machine-written and is not a substitute for human review."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,11 +166,11 @@ func TestVerdictBodiesSayTheyAreMachineWritten(t *testing.T) {
 // findings do not hang off the verdict review. Saying they did would send a
 // colleague looking for comments that are not there.
 func TestTheFindingsBodyDoesNotClaimTheCommentsAreOnThisReview(t *testing.T) {
-	if strings.Contains(verdictBodyFindings, "on this review") {
-		t.Errorf("the findings are not comments on this review: %q", verdictBodyFindings)
+	if strings.Contains(verdictBodyFindings(1), "on this review") {
+		t.Errorf("the findings are not comments on this review: %q", verdictBodyFindings(1))
 	}
-	if !strings.Contains(verdictBodyFindings, "inline comments on this pull request") {
-		t.Errorf("the body must say where the findings actually are: %q", verdictBodyFindings)
+	if !strings.Contains(verdictBodyFindings(1), "inline comments on this pull request") {
+		t.Errorf("the body must say where the findings actually are: %q", verdictBodyFindings(1))
 	}
 }
 
@@ -393,7 +394,7 @@ func TestLiveReplaySubmitsExactlyOneVerdict(t *testing.T) {
 		t.Fatalf("want exactly one gh pr review call, got %+v", calls)
 	}
 	want := []string{"pr", "review", "12", "--repo", "example-org/aex-balances",
-		"--approve", "--body", verdictBodyApprove}
+		"--approve", "--body", verdictBodyApprove(1)}
 	if !slices.Equal(calls[0].Args, want) {
 		t.Errorf("Args = %q,\nwant %q", calls[0].Args, want)
 	}
@@ -446,5 +447,57 @@ func TestPrintOnlySubmitsNoVerdict(t *testing.T) {
 	}
 	if calls := ghReviewCalls(f); len(calls) != 0 {
 		t.Fatalf("print-only must submit nothing, got %+v", calls)
+	}
+}
+
+// TestALaterPassDoesNotCallItselfTheFirst is the fix for text that was about
+// to go onto colleagues' pull requests.
+//
+// The bodies were constants reading "Automated first pass by firstpass".
+// Re-reviews have been live for days -- production records show passes 2, 3
+// and 5 -- so the fifth review of a pull request would have introduced itself
+// as the first. The only reason it never did is that no verdict was ever
+// submitted, which was a separate bug; fixing that one armed this one.
+func TestALaterPassDoesNotCallItselfTheFirst(t *testing.T) {
+	for _, pass := range []int{2, 3, 5} {
+		for _, body := range []string{verdictBodyApprove(pass), verdictBodyFindings(pass)} {
+			if strings.Contains(body, "first pass") {
+				t.Errorf("pass %d body still calls itself the first pass:\n%s", pass, body)
+			}
+			if !strings.Contains(body, fmt.Sprintf("pass %d", pass)) {
+				t.Errorf("pass %d body must say which pass it is:\n%s", pass, body)
+			}
+		}
+	}
+	// Pass 1 keeps the wording that is true of it.
+	if !strings.Contains(verdictBodyApprove(1), "first pass") {
+		t.Errorf("the first pass may say so: %q", verdictBodyApprove(1))
+	}
+}
+
+// TestALaterPassApprovalSaysWhatItCovers is the honesty this feature needs
+// most, and it is not about the word "first".
+//
+// A later pass is asked to concentrate on the commits added since the previous
+// one and explicitly not to restate its findings. So an approval on pass 2
+// means "the new commits raised nothing", not "this pull request is fine" --
+// and those readings come apart exactly when it matters, when an earlier pass
+// raised findings the author has not addressed. An approval submitted under
+// the operator's own identity that reads as a blessing of the whole change is
+// the most expensive thing this tool can get wrong.
+func TestALaterPassApprovalSaysWhatItCovers(t *testing.T) {
+	body := verdictBodyApprove(2)
+	for _, want := range []string{
+		"commits added since the previous automated pass",
+		"may be unaddressed",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("a later pass's approval must scope itself (%q missing):\n%s", want, body)
+		}
+	}
+	// A first pass has nothing earlier to qualify, and the caveat would be
+	// noise that trains readers to skip the body.
+	if strings.Contains(verdictBodyApprove(1), "may be unaddressed") {
+		t.Errorf("the first pass has no earlier findings to warn about: %q", verdictBodyApprove(1))
 	}
 }
