@@ -107,7 +107,7 @@ func TestRunReturnsTheParsedVerdict(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &runner.Fake{Replies: []runner.Reply{
-				{Match: "code-review", Result: runner.Result{Stdout: []byte(tc.stdout)}},
+				{Match: "Review pull request", Result: runner.Result{Stdout: []byte(tc.stdout)}},
 			}}
 			res, err := New(f, "claude", nil, false, t.TempDir()).Run(context.Background(), "work", ref, nil, nil)
 			if err != nil {
@@ -162,9 +162,12 @@ func TestVerdictInstructionStatesTheProtocolAndTheSeverityRule(t *testing.T) {
 //     "FIRSTPASS-VERDICT: findings", parsed and recorded. One variable
 //     changed between that run and the failing one.
 //
-// The $ARGUMENTS worry was real but harmless: the shipped command definition
-// references $ARGUMENTS nowhere, so its arguments reach the reviewer as
-// trailing prompt text rather than being parsed for flags.
+// The $ARGUMENTS worry was real but harmless: the command definition
+// referenced $ARGUMENTS nowhere, so its arguments reached the reviewer as
+// trailing prompt text rather than being parsed for flags. The slash command
+// is gone now in favour of a general instruction, which removes the concern
+// entirely -- but the measurement it produced is why the ask is still stated
+// in the -p value and not left to the system prompt alone.
 func TestThePromptCarriesTheVerdictAsk(t *testing.T) {
 	for _, dry := range []bool{true, false} {
 		got := New(&runner.Fake{}, "claude", nil, dry, t.TempDir()).Prompt(ref)
@@ -173,8 +176,8 @@ func TestThePromptCarriesTheVerdictAsk(t *testing.T) {
 			t.Errorf("dryRun=%v: the prompt must ask for both verdict lines, or the reviewer "+
 				"finishes its review and prints nothing firstpass can read: %q", dry, got)
 		}
-		if !strings.HasPrefix(got, "/code-review ") {
-			t.Errorf("dryRun=%v: the command must still lead the prompt: %q", dry, got)
+		if !strings.HasPrefix(got, "Review pull request ") {
+			t.Errorf("dryRun=%v: the prompt must still open by naming the pull request: %q", dry, got)
 		}
 		// ParseVerdict takes the LAST marked line, so "print nothing after it"
 		// is what stops a recap or a sentence quoting the marker from becoming
@@ -196,7 +199,7 @@ func TestBothModesPassTheSameVerdictInstructionToClaude(t *testing.T) {
 	arg := func(dry bool) string {
 		t.Helper()
 		f := &runner.Fake{Replies: []runner.Reply{
-			{Match: "code-review", Result: runner.Result{Stdout: []byte("x")}},
+			{Match: "Review pull request", Result: runner.Result{Stdout: []byte("x")}},
 		}}
 		if _, err := New(f, "claude", nil, dry, t.TempDir()).Run(context.Background(), "work", ref, nil, nil); err != nil {
 			t.Fatal(err)
@@ -233,7 +236,7 @@ func TestDryRunReportStatesTheWouldBeVerdict(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &runner.Fake{Replies: []runner.Reply{
-				{Match: "code-review", Result: runner.Result{Stdout: []byte(tc.stdout)}},
+				{Match: "Review pull request", Result: runner.Result{Stdout: []byte(tc.stdout)}},
 			}}
 			res, err := New(f, "claude", nil, true, t.TempDir()).Run(context.Background(), "work", ref, nil, nil)
 			if err != nil {

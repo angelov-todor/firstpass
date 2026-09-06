@@ -16,48 +16,62 @@ var ref = prref.PRRef{Owner: "Example-Org", Repo: "aex-balances", Number: 12}
 
 // C1a: the prompt is the only channel that can tell the reviewer which pull
 // request to review. The prepared worktree is a detached checkout of the PR
-// head with no branch and no upstream, so a bare "/code-review" reviews an
-// empty diff -- and in live mode has no PR to comment on.
+// head with no branch and no upstream, so a review that is not told which pull
+// request it is looking at sees an empty diff -- and in live mode has no PR to
+// comment on.
 func TestPromptNamesThePRAndOmitsCommentInDryRun(t *testing.T) {
 	rr := New(&runner.Fake{}, "claude", nil, true, t.TempDir())
 	got := rr.Prompt(ref)
-	// The command and its target lead the prompt; the verdict ask follows it.
-	// See promptVerdictAsk for why it is there.
-	if !strings.HasPrefix(got, "/code-review "+ref.URL()) {
-		t.Errorf("Prompt() = %q, want it to open with the command and the PR URL", got)
+	// A general instruction naming the pull request, not a slash command. That
+	// is what lets the reviewer's own skills be selected for the repository it
+	// is looking at -- a .NET review skill for a C# service -- instead of a
+	// command's fixed procedure crowding them out.
+	if !strings.HasPrefix(got, "Review pull request "+ref.URL()) {
+		t.Errorf("Prompt() = %q, want it to open by naming the pull request", got)
 	}
-	if strings.Contains(got, "--comment") {
-		t.Errorf("Prompt() = %q; a dry run must not post", got)
+	// A dry run says so outright. Under the old slash command, dry run was
+	// expressed by withholding a --comment flag that the command never read,
+	// so nothing actually stopped it posting except that it happened not to.
+	if !strings.Contains(got, "Do NOT post anything to GitHub") {
+		t.Errorf("Prompt() = %q; a dry run must forbid posting, not merely omit a flag", got)
 	}
 }
 
 func TestPromptNamesThePRAndIncludesCommentWhenLive(t *testing.T) {
 	rr := New(&runner.Fake{}, "claude", nil, false, t.TempDir())
 	got := rr.Prompt(ref)
-	if !strings.HasPrefix(got, "/code-review "+ref.URL()+" --comment") {
-		t.Errorf("Prompt() = %q, want it to open with the command, the PR URL and --comment", got)
+	if !strings.HasPrefix(got, "Review pull request "+ref.URL()) {
+		t.Errorf("Prompt() = %q, want it to open by naming the pull request", got)
+	}
+	// Live, the reviewer has to be told to post: nothing else will. The skill
+	// that reviews .NET changes produces a report and posts nothing at all --
+	// which the old slash command did do, and is why the instruction had to
+	// become explicit when the command went away.
+	if !strings.Contains(got, "Post each finding as an inline comment") {
+		t.Errorf("Prompt() = %q; a live review must be told to post its findings", got)
+	}
+	if strings.Contains(got, "Do NOT post") {
+		t.Errorf("Prompt() = %q; a live review must not be told to stay quiet", got)
 	}
 }
 
-// Dry run and live must differ by exactly the --comment flag: that
-// equivalence is what makes reading a dry-run report a trustworthy preview of
-// what would be posted. Asserted by removing the flag rather than by
-// appending it, because the flag now sits between the command and the verdict
-// ask rather than at the end.
-func TestDryRunAndLivePromptsDifferOnlyByComment(t *testing.T) {
+// Dry run and live must differ in exactly one thing: whether the reviewer is
+// told to post. Everything else -- what to review, what to judge, what to
+// print -- has to be identical, because that equivalence is what makes reading
+// a dry-run report a trustworthy preview of what a live run would do.
+func TestDryRunAndLivePromptsDifferOnlyInWhetherTheyPost(t *testing.T) {
 	dry := New(&runner.Fake{}, "claude", nil, true, t.TempDir()).Prompt(ref)
 	live := New(&runner.Fake{}, "claude", nil, false, t.TempDir()).Prompt(ref)
-	if strings.Replace(live, " --comment", "", 1) != dry {
-		t.Errorf("dry = %q, live = %q; the only difference must be --comment", dry, live)
-	}
-	if !strings.Contains(live, "--comment") {
-		t.Errorf("live = %q must carry --comment", live)
+
+	if strings.Replace(dry, dryRunPostingClause, livePostingClause, 1) != live {
+		t.Errorf("the prompts differ by more than the posting instruction:\ndry:  %q\nlive: %q",
+			dry, live)
 	}
 }
 
 func TestRunInvokesClaudeInTheWorktreeWithConfiguredArgs(t *testing.T) {
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{Stdout: []byte("no findings")}},
+		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("no findings")}},
 	}}
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, true, t.TempDir())
 
@@ -88,7 +102,7 @@ func TestRunInvokesClaudeInTheWorktreeWithConfiguredArgs(t *testing.T) {
 
 func TestRunPassesTheLivePromptInOrder(t *testing.T) {
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{Stdout: []byte("posted")}},
+		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("posted")}},
 	}}
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, false, t.TempDir())
 
@@ -111,7 +125,7 @@ func TestRunPassesTheLivePromptInOrder(t *testing.T) {
 func TestRunWritesAReportInDryRun(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{Stdout: []byte("finding: off-by-one")}},
+		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("finding: off-by-one")}},
 	}}
 	rr := New(f, "claude", nil, true, dir)
 
@@ -136,12 +150,14 @@ func TestRunWritesAReportInDryRun(t *testing.T) {
 func TestRunWritesNoReportWhenLive(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		// A verdict line, because a live review that produced one has nothing
-		// left to explain: its findings are on the pull request and its
-		// verdict is in the record. The no-verdict case is the exception and
-		// is covered by the test below.
-		{Match: "code-review", Result: runner.Result{
-			Stdout: []byte("posted\n" + VerdictMarker + " findings\n"),
+		// An APPROVE verdict, because that is now the only live outcome with
+		// nothing left to preserve: nothing was raised, so there are no
+		// findings to lose. Every other live outcome keeps its output -- no
+		// verdict, a failure, and findings, the last because posting became an
+		// instruction in the prompt rather than something the slash command
+		// did, and the skills a general prompt selects do not all post.
+		{Match: "Review pull request", Result: runner.Result{
+			Stdout: []byte("nothing to report\n" + VerdictMarker + " approve\n"),
 		}},
 	}}
 	rr := New(f, "claude", nil, false, dir)
@@ -175,7 +191,7 @@ func TestRunWritesNoReportWhenLive(t *testing.T) {
 func TestALiveReviewWithNoVerdictKeepsItsOutput(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{Stdout: []byte("a full review, ending in prose")}},
+		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("a full review, ending in prose")}},
 	}}
 	rr := New(f, "claude", nil, false, dir)
 
@@ -200,9 +216,44 @@ func TestALiveReviewWithNoVerdictKeepsItsOutput(t *testing.T) {
 	}
 }
 
+// A live review that raised findings keeps its output, because it can no
+// longer be assumed the findings reached the pull request.
+//
+// Posting used to be the slash command's job. It is now an instruction in the
+// prompt, and the skills a general prompt selects do not all post -- the .NET
+// review skill produces a report and posts nothing at all. Discarding the
+// output of a review that found something would then lose the findings
+// entirely and silently, which is the worst outcome available: the pull
+// request looks reviewed and nothing was said.
+func TestALiveFindingsReviewKeepsItsOutput(t *testing.T) {
+	dir := t.TempDir()
+	f := &runner.Fake{Replies: []runner.Reply{
+		{Match: "Review pull request", Result: runner.Result{
+			Stdout: []byte("the allocation on line 9 is unbounded\n" + VerdictMarker + " findings\n"),
+		}},
+	}}
+	rr := New(f, "claude", nil, false, dir)
+
+	res, err := rr.Run(t.Context(), "work", ref, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ReportPath == "" {
+		t.Fatal("a live review with findings must keep its output: nothing else proves what " +
+			"it found if the reviewer reported instead of posting")
+	}
+	body, rerr := os.ReadFile(res.ReportPath)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !strings.Contains(string(body), "unbounded") {
+		t.Errorf("the kept output must be what the reviewer printed:\n%s", body)
+	}
+}
+
 func TestRunSurfacesNonZeroExit(t *testing.T) {
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Result: runner.Result{ExitCode: 1, Stderr: []byte("rate limited")}},
+		{Match: "Review pull request", Result: runner.Result{ExitCode: 1, Stderr: []byte("rate limited")}},
 	}}
 	rr := New(f, "claude", nil, true, t.TempDir())
 
@@ -217,7 +268,7 @@ func TestRunSurfacesNonZeroExit(t *testing.T) {
 
 func TestRunSurfacesTimeout(t *testing.T) {
 	f := &runner.Fake{Replies: []runner.Reply{
-		{Match: "code-review", Err: context.DeadlineExceeded},
+		{Match: "Review pull request", Err: context.DeadlineExceeded},
 	}}
 	rr := New(f, "claude", nil, false, t.TempDir())
 

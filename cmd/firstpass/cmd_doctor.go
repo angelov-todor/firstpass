@@ -87,6 +87,19 @@ func cmdDoctor(args []string) error {
 		add("config valid", explainValidate(cfg, *cfgPath), fmt.Sprintf("dry_run=%v allow_owners=%v", cfg.DryRun, cfg.AllowOwners))
 		add("state dir writable", writable(cfg.StateDir), cfg.StateDir)
 		add("chat.py present", exists(cfg.Paths.ChatScript), cfg.Paths.ChatScript)
+		// Only when configured: docs_root is optional, and an install without
+		// one is not broken, it just gets no compliance dimension.
+		//
+		// Checked at all because the failure is otherwise invisible. A docs
+		// root that does not exist produces reviews that read exactly like
+		// reviews that found nothing to say about compliance -- the reviewer is
+		// pointed at a missing directory, finds nothing, and says nothing. The
+		// operator would have no reason to suspect the feature was off.
+		if cfg.DocsRoot != "" {
+			// isDir, not exists: a docs_root pointing at a plain file passes an
+			// existence check and then every path built under it is missing.
+			add("docs root present", isDir(cfg.DocsRoot), cfg.DocsRoot)
+		}
 
 		r := runner.OS{}
 		bounded := func(fn func(context.Context) error) error {
@@ -179,6 +192,24 @@ func exists(path string) error {
 	}
 	if _, err := os.Stat(path); err != nil {
 		return err
+	}
+	return nil
+}
+
+// isDir is exists() plus the type check. A docs_root pointing at a plain file
+// passes an existence check and then every path built under it is missing --
+// which yields reviews indistinguishable from reviews with nothing to say
+// about compliance.
+func isDir(path string) error {
+	if path == "" {
+		return errors.New("not configured")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is a file, not a directory", path)
 	}
 	return nil
 }

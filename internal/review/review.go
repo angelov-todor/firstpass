@@ -1,7 +1,12 @@
 // Package review runs a code review over a prepared checkout by driving the
-// claude CLI, so the repository's own CLAUDE.md, the dotnet-techne-code-review
-// skill and the sonarqube MCP all apply without firstpass knowing about any of
-// them.
+// claude CLI with a general instruction rather than a slash command, so the
+// repository's own CLAUDE.md, whichever review skills the reviewer selects for
+// that repository, and the sonarqube MCP all apply without firstpass knowing
+// about any of them.
+//
+// The general instruction is the point: a slash command's own procedure
+// crowds out installed skills, and in a C# repository a general prompt loads a
+// .NET review skill on its own.
 package review
 
 import (
@@ -30,9 +35,9 @@ type Result struct {
 // Verdict is the reviewer's own answer to "does this pull request need a human
 // to change something?".
 //
-// firstpass is deliberately ignorant of the findings themselves —
-// /code-review posts them as inline comments and firstpass sees only the exit
-// code and stdout — so this one line is the whole channel between the two.
+// firstpass is deliberately ignorant of the findings themselves — the
+// reviewer posts them as inline comments and firstpass sees only the exit code
+// and stdout — so this one line is the whole channel between the two.
 // Deciding the verdict is the reviewer's job; submitting it is firstpass's.
 type Verdict string
 
@@ -90,6 +95,10 @@ type Runner struct {
 	extraArgs  []string
 	dryRun     bool
 	reportsDir string
+	// docsRoot is the specification and compliance checkout, or empty. Empty
+	// means reviews say nothing about compliance and the system prompt is
+	// exactly what it was before this existed.
+	docsRoot string
 }
 
 // New builds a review runner. extraArgs comes from config and normally carries
@@ -98,6 +107,17 @@ type Runner struct {
 // answer.
 func New(r runner.Runner, claude string, extraArgs []string, dryRun bool, reportsDir string) *Runner {
 	return &Runner{r: r, claude: claude, extraArgs: extraArgs, dryRun: dryRun, reportsDir: reportsDir}
+}
+
+// WithDocs points the reviewer at the specification and compliance checkout.
+//
+// A setter rather than another New parameter, so every existing caller and
+// every existing test keeps working unchanged -- which is what makes "a review
+// with no docs configured is byte-identical to the review firstpass did
+// before" a property a test can assert rather than a claim.
+func (rr *Runner) WithDocs(root string) *Runner {
+	rr.docsRoot = root
+	return rr
 }
 
 // promptVerdictAsk is the verdict requirement as it appears in the -p value,
@@ -144,10 +164,51 @@ const promptVerdictAsk = "\n\nWhen the review is complete, print exactly one of 
 	// commit is the evidence that the system prompt alone is not obeyed.
 	"Print nothing at all after that line, and no other line beginning with " + VerdictMarker
 
-// Prompt is what claude is asked to do: the slash command naming the pull
-// request under review, and the verdict line firstpass reads back. Dry run and
-// live differ by exactly the --comment flag, so a dry-run report is what would
-// have been posted.
+// The two posting clauses, and the only thing that differs between a dry run
+// and a live one.
+//
+// Constants rather than inline strings because a test asserts that the dry-run
+// and live prompts are identical apart from swapping one for the other -- and
+// that assertion is only worth having if it cannot drift from what Prompt
+// actually says. Written inline, the test duplicated the wording and went
+// stale the first time the clause was edited.
+const (
+	// Said outright rather than left to a flag. Dry run used to be expressed
+	// by withholding --comment, which /code-review never read -- it referenced
+	// $ARGUMENTS nowhere -- so nothing prevented a dry run from posting except
+	// that the reviewer happened not to.
+	//
+	// The precedence sentence is not padding. The same prompt can carry
+	// instructions about how to post: the second-pass note asks the reviewer to
+	// check the pull request before posting a duplicate, and the prior-feedback
+	// clause tells it not to re-post what is already there. Both are reachable
+	// in a dry run -- a `replay` of a pull request a live pass already reviewed
+	// -- and both read as confirmation that posting is expected.
+	dryRunPostingClause = " Do NOT post anything to GitHub: no comments, no review, nothing. " +
+		"Report your findings in your output instead. This overrides anything else you are told " +
+		"about posting, including any instruction about checking for or avoiding duplicate " +
+		"comments: in this run there is nothing to duplicate because you are posting nothing."
+
+	// Live has to be told to post, which the slash command used to handle. It
+	// cannot be assumed: the skill that reviews .NET changes produces a report
+	// and posts nothing at all.
+	livePostingClause = " Post each finding as an inline comment on the pull request, on the " +
+		"line it concerns, using gh."
+)
+
+// Prompt is what claude is asked to do: a general instruction naming the pull
+// request under review, and the verdict line firstpass reads back.
+//
+// A general instruction rather than a slash command, because a command's own
+// procedure crowds out the skills installed on the machine. Measured: in a C#
+// repository a general review prompt loads a .NET review skill on its own and
+// produces findings against a blocking / important / suggestion taxonomy,
+// which is firstpass's own rule about what blocks an approval. The command it
+// replaced prescribed its own pipeline of subagents and consulted no skills at
+// all.
+//
+// Dry run and live differ by exactly one clause -- whether the reviewer is told
+// to post -- so a dry-run report is what would have been posted.
 //
 // The ref is load-bearing, not decoration. The checkout Prepare hands over is
 // a detached worktree of the PR head inside firstpass's own bare mirror: it has
@@ -160,9 +221,12 @@ const promptVerdictAsk = "\n\nWhen the review is complete, print exactly one of 
 // been exercised against real claude is still exactly what is asked; see
 // promptVerdictAsk for why the verdict requirement is repeated here.
 func (rr *Runner) Prompt(ref prref.PRRef) string {
-	p := "/code-review " + ref.URL()
-	if !rr.dryRun {
-		p += " --comment"
+	p := "Review pull request " + ref.URL() + " for correctness, performance, security and " +
+		"maintainability. Read the change and whatever context you need to judge it."
+	if rr.dryRun {
+		p += dryRunPostingClause
+	} else {
+		p += livePostingClause
 	}
 	return p + promptVerdictAsk
 }
@@ -385,6 +449,16 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 	prior *PriorFeedback) (Result, error) {
 
 	system := verdictInstruction
+	// Ordered deliberately, and the order is the whole point of putting this
+	// here rather than further down: what governs this code is identical for
+	// every review in a repository, while the second-pass note carries a
+	// per-pass commit SHA and the prior-feedback index changes per pull
+	// request. Stable material first is what keeps the prompt prefix
+	// cacheable; appending it after the per-pass notes -- which is where it
+	// went first -- made that rationale false on every second pass.
+	if note := docsNote(rr.docsRoot); note != "" {
+		system += "\n\n" + note
+	}
 	// Posted is a gate, not merely a wording input. An earlier pass that
 	// posted nothing left nothing on the pull request to duplicate and nothing
 	// to hold back, so there is nothing worth telling the reviewer -- and both
@@ -404,10 +478,23 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 
 	// extraArgs stays last: it is operator-controlled config, so it must keep
 	// being able to override anything firstpass sets for itself.
-	args := append([]string{
+	args := []string{
 		"-p", rr.Prompt(ref) + priorClause(prior),
 		"--append-system-prompt", system,
-	}, rr.extraArgs...)
+	}
+	if rr.docsRoot != "" {
+		// The docs live outside the worktree the review runs in. Reaching them
+		// currently works only because claude_args carries
+		// --permission-mode bypassPermissions -- which is operator-owned
+		// config, documented as overridable, and the thing this project most
+		// wants to be able to retire. Granting the directory explicitly means
+		// the compliance dimension does not quietly depend on a blanket
+		// permission staying switched on.
+		args = append(args, "--add-dir", rr.docsRoot)
+	}
+	// extraArgs stays last: it is operator-controlled config, so it must keep
+	// being able to override anything firstpass sets for itself.
+	args = append(args, rr.extraArgs...)
 
 	res, err := rr.r.Run(ctx, dir, rr.claude, args...)
 	out := Result{
@@ -453,7 +540,15 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 		// the operator is told comments may be half posted. Whatever the
 		// reviewer had printed is the only evidence of how far it actually
 		// got.
-		if runErr != nil || out.Verdict == VerdictUnknown {
+		//
+		// VerdictFindings is included for a reason that only appeared once the
+		// slash command went away. Posting is now a prose instruction, and the
+		// skills a general prompt selects do not necessarily post -- the .NET
+		// review skill produces a report and posts nothing at all. So a live
+		// review can finish, print `findings`, and leave nothing on the pull
+		// request; discarding its output would lose the findings entirely and
+		// silently. Keeping it costs one file per review with findings.
+		if runErr != nil || out.Verdict == VerdictUnknown || out.Verdict == VerdictFindings {
 			if path, werr := rr.writeReport(ref, previous, res.Stdout, res.Stderr, out.Verdict, runErr); werr == nil {
 				out.ReportPath = path
 			}

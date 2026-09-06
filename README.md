@@ -25,10 +25,19 @@ One sweep, on a ticker or on demand:
    [Second pass](#second-pass).
 4. For each survivor, prepare a throwaway git worktree against a local bare
    mirror of the repository.
-5. Run `claude -p "/code-review <pr-url>"` in that worktree, asking the
-   reviewer to finish by printing one machine-readable verdict line. The ask
-   is made **twice**: in the `-p` value after the command, and again in
+5. Run `claude -p "Review pull request <pr-url> ..."` in that worktree, asking
+   the reviewer to finish by printing one machine-readable verdict line. The
+   ask is made **twice**: in the `-p` value, and again in
    `--append-system-prompt`.
+
+   The prompt is a general instruction rather than a slash command, and that
+   is deliberate. A command's own procedure crowds out the reviewer's skills;
+   a general instruction lets them be selected for the repository being
+   reviewed. Measured: in a C# repo, a general review prompt loads
+   `dotnet-techne-code-review` on its own and produces findings with a
+   severity taxonomy of blocking / important / suggestion — which maps onto
+   firstpass's own rule that mandatory points block an approval and nits do
+   not.
 
    The duplication is not belt-and-braces for its own sake. The system prompt
    alone did not work: fourteen consecutive production reviews finished,
@@ -37,9 +46,13 @@ One sweep, on a ticker or on demand:
    a long agentic run the task's instructions win — the same reviewer ignored
    an appended "do not perform any review" and worked for over three minutes.
    Restating the ask in the user turn puts it where it is the last thing said.
-6. In dry run (the default), the findings are written to a report file. Live,
-   `/code-review` posts them as inline comments on the PR — and firstpass
-   writes a report anyway in the two live cases it could not otherwise
+6. In dry run (the default), the findings are written to a report file and the
+   reviewer is **told outright** to post nothing. That instruction matters:
+   under the old slash command, dry run was expressed by withholding a
+   `--comment` flag that the command never actually read, so the only thing
+   keeping a dry run quiet was that the reviewer happened not to post. Live,
+   the reviewer is told to post each finding as an inline comment — and
+   firstpass writes a report anyway in the two live cases it could not otherwise
    explain: a review that finished without a verdict line, and one that did
    not finish at all. A live report says plainly that its comments are
    posted.
@@ -311,6 +324,32 @@ configured Google Chat account can actually see named spaces).
 
 Every command accepts `-config <path>` to point at a config file other than
 the default.
+
+## Compliance
+
+`docs_root` is optional. Set it to a checkout of the project's specifications
+and compliance material, and the reviewer is told where that material is and
+asked to check any change touching behaviour a specification or regulation may
+govern — endpoints, fields, thresholds, denial rules, status transitions,
+events, or anything in margin, futures, liquidation, fee, interest, KYC,
+withdrawal, surveillance or position-limit behaviour.
+
+It is a path rather than anything copied into the prompt. The compliance books
+alone run to roughly 700,000 words — about five context windows — so the
+reviewer searches them. The note distinguishes the small top-level documents
+worth opening (gap analysis, audit requirements, open questions, the service
+registry) from the books, which are for grepping, and points at the team's own
+written retrieval procedure.
+
+Two rules travel with it, and the second matters more than the first: a
+compliance finding must **cite** the document and section it rests on, and a
+finding that cannot be cited must not be raised at all. firstpass submits under
+your GitHub identity, and an invented regulatory claim on a colleague's pull
+request costs more than the finding could have been worth.
+
+`doctor` checks the path exists when it is set — a wrong path yields reviews
+indistinguishable from reviews with nothing to say about compliance, which is
+the failure mode hardest to notice.
 
 ## Concurrency
 

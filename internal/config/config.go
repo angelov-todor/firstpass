@@ -78,8 +78,16 @@ type Config struct {
 	AllowOwners        []string `yaml:"allow_owners"`
 	DenyRepos          []string `yaml:"deny_repos"`
 	ClaudeArgs         []string `yaml:"claude_args"`
-	StateDir           string   `yaml:"state_dir"`
-	Paths              Paths    `yaml:"paths"`
+	// DocsRoot is the checkout of the project's specification and compliance
+	// documentation. Left empty, reviews say nothing about compliance and
+	// nothing else changes.
+	//
+	// It is a path rather than a copy because the material is far too large to
+	// travel in a prompt: the compliance books alone are about 700,000 words,
+	// roughly five context windows. The reviewer searches them.
+	DocsRoot string `yaml:"docs_root"`
+	StateDir string `yaml:"state_dir"`
+	Paths    Paths  `yaml:"paths"`
 }
 
 // Default is the shipped configuration: safe, but not yet usable. Space,
@@ -270,6 +278,20 @@ func (c Config) Validate() error {
 	if c.PendingMaxAge.D() <= 0 {
 		return errors.New("pending_max_age must be positive: zero makes every parked PR expire " +
 			"terminally on its next sweep, so nothing deferred is ever reviewed")
+	}
+	// Trimmed here so every consumer agrees on what "unset" means. docsNote
+	// trims before deciding whether it has a root; doctor was checking the
+	// untrimmed value, so `docs_root: "  "` produced a doctor FAIL for a
+	// feature the reviewer treated as switched off.
+	c.DocsRoot = strings.TrimSpace(c.DocsRoot)
+	if c.DocsRoot != "" && !filepath.IsAbs(c.DocsRoot) {
+		// The same trap state_dir has: a relative path is resolved against the
+		// process's working directory when doctor checks it, and against the
+		// throwaway worktree when the review runs. So it passes every check the
+		// operator can see and points at nothing where it matters -- which
+		// yields a review with no compliance dimension that reads exactly like
+		// a review with nothing to say about compliance.
+		return fmt.Errorf("docs_root must be an absolute path, got %q", c.DocsRoot)
 	}
 	if c.StateDir == "" {
 		return errors.New("state_dir is required")
