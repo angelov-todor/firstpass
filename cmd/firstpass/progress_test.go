@@ -324,6 +324,10 @@ func (quietTestPRs) Inspect(context.Context, prref.PRRef) (ghpr.PRInfo, error) {
 // quietTestRev returns no verdict either. Reaching here means one of those
 // two facts has changed, so it fails rather than quietly writing to GitHub's
 // stand-in.
+func (quietTestPRs) FetchFeedback(context.Context, prref.PRRef) (ghpr.Feedback, error) {
+	return ghpr.Feedback{}, nil
+}
+
 func (quietTestPRs) SubmitReview(_ context.Context, ref prref.PRRef, verdict, _ string) error {
 	return fmt.Errorf("this test must submit no verdict, got %q for %s", verdict, ref.Key())
 }
@@ -336,7 +340,7 @@ func (quietTestWTs) Prepare(context.Context, prref.PRRef) (string, func(), error
 
 type quietTestRev struct{}
 
-func (quietTestRev) Run(context.Context, string, prref.PRRef, *review.PreviousPass) (review.Result, error) {
+func (quietTestRev) Run(context.Context, string, prref.PRRef, *review.PreviousPass, *review.PriorFeedback) (review.Result, error) {
 	return review.Result{}, nil
 }
 

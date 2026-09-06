@@ -35,6 +35,11 @@ type (
 	// request, plus the one thing it writes back.
 	PRClient interface {
 		Inspect(ctx context.Context, ref prref.PRRef) (ghpr.PRInfo, error)
+		// FetchFeedback enumerates the feedback already on a pull request.
+		// firstpass cannot judge whether a point was addressed -- that needs
+		// the code -- so its job is to make sure the reviewer is shown every
+		// point that exists, and to refuse an approval when it could not.
+		FetchFeedback(ctx context.Context, ref prref.PRRef) (ghpr.Feedback, error)
 		// SubmitReview submits the verdict of a finished review. It is on
 		// this interface rather than left to the prompt so the action is
 		// firstpass's: recorded in the store, visible in status, and
@@ -51,7 +56,13 @@ type (
 		// pass restates every finding the author has not fixed, on the same
 		// lines. It reaches claude as part of the system prompt, never in
 		// the -p value.
-		Run(ctx context.Context, dir string, ref prref.PRRef, previous *review.PreviousPass) (review.Result, error)
+		//
+		// prior is the feedback already on the pull request, from every
+		// surface and every author. It is what makes an approval mean
+		// something about the whole change rather than only the newest
+		// commits.
+		Run(ctx context.Context, dir string, ref prref.PRRef, previous *review.PreviousPass,
+			prior *review.PriorFeedback) (review.Result, error)
 	}
 	// Reactor puts reactions on chat messages, so the team can see that a
 	// posted pull request has been picked up. Everything it does is
@@ -139,6 +150,46 @@ func verdictBodyFindings(pass int) string {
 		"The findings are posted as inline comments on this pull request. This is deliberately " +
 		"a comment rather than a request for changes, so the pull request stays in the team's " +
 		"human review queue.\n\n" + firstpassURL
+}
+
+// toPriorFeedback converts what GitHub reported into what the reviewer is
+// shown. The two types are separate so the review package can be tested
+// without the GitHub client; see review.PriorItem.
+func toPriorFeedback(f ghpr.Feedback) *review.PriorFeedback {
+	p := &review.PriorFeedback{Incomplete: f.Truncated}
+	for _, it := range f.Items {
+		p.Items = append(p.Items, review.PriorItem{
+			Surface:  it.Surface,
+			Author:   it.Author,
+			IsBot:    it.IsBot,
+			Path:     it.Path,
+			Line:     it.Line,
+			Resolved: it.Resolved,
+			Outdated: it.Outdated,
+			State:    it.State,
+			Excerpt:  it.Excerpt,
+			URL:      it.URL,
+		})
+	}
+	return p
+}
+
+// verdictBodyWithheld is submitted when the reviewer decided approve and
+// firstpass declined to turn that into an approving review.
+//
+// It says so plainly rather than dressing it up as findings. A colleague
+// reading it needs to know two things that are both true and neither obvious:
+// the automated review found nothing to change, and it is deliberately not
+// approving anyway.
+func verdictBodyWithheld(pass int, reason string) string {
+	which := "Automated first pass"
+	if pass > 1 {
+		which = fmt.Sprintf("Automated pass %d", pass)
+	}
+	return fmt.Sprintf("%s by firstpass — no findings, approval withheld. "+
+		"This is machine-written, not a human review.\n\n"+
+		"firstpass ran a Claude Code review and raised nothing needing a change, but it did "+
+		"not submit an approval because %s.\n\n%s", which, reason, firstpassURL)
 }
 
 // noVerdictDetail is recorded when a review finished but printed no verdict
@@ -1002,6 +1053,31 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 		return dec(ActionWouldReview, reason)
 	}
 
+	// The feedback already on the pull request, fetched before the review so
+	// the reviewer can be shown it and so the approval gates below have
+	// something to stand on.
+	//
+	// A failure here does not abandon the review: a review that cannot approve
+	// is still worth having, and the alternative -- skipping the pull request
+	// because a second GitHub call failed -- trades a whole review for a
+	// verdict. What it does do is make an approval impossible, and tell the
+	// reviewer its list is incomplete.
+	prior := &review.PriorFeedback{}
+	gate := verdictGate{feedbackUsable: true}
+	fbctx, cancelFeedback := context.WithTimeout(ctx, p.Cfg.GHTimeout.D())
+	fb, ferr := p.PRs.FetchFeedback(fbctx, ref)
+	cancelFeedback()
+	if ferr != nil {
+		p.Log.Warn("could not read the existing feedback on this pull request; the review will "+
+			"run but cannot end in an approval", "key", ref.Key(), "err", ferr)
+		gate.feedbackUsable = false
+		prior.Incomplete = true
+	} else {
+		prior = toPriorFeedback(fb)
+		gate.feedbackUsable = fb.Usable()
+		gate.changesRequested = fb.ChangesRequested()
+	}
+
 	// Claim a review slot before the clone, which is the first expensive step,
 	// so a candidate turned away by the cap costs nothing. Counted as an
 	// attempt rather than a success: this is what the per-sweep cap bounds, so
@@ -1117,7 +1193,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 
 	reviewStarted = true
 	p.progress(Event{Stage: StageReviewStarted, Ref: ref, Index: idx, Total: total})
-	res, rerr := p.Rev.Run(rctx, dir, ref, prevPass)
+	res, rerr := p.Rev.Run(rctx, dir, ref, prevPass, prior)
 	done := p.now()
 
 	rec.DecidedAt = done
@@ -1191,7 +1267,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 	// review returned above and submitted nothing: it may have posted a
 	// partial comment set, and a verdict on top of that would state a
 	// conclusion the review never reached.
-	p.submitVerdict(ctx, &rec, ref, res.Verdict)
+	p.submitVerdict(ctx, &rec, ref, res.Verdict, gate)
 	if err := p.Store.PutReview(rec); err != nil {
 		p.Log.Error("put review", "key", ref.Key(), "err", err)
 		note(err)
@@ -1234,11 +1310,57 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 //     in the detail, where `firstpass status` shows it. Not retried
 //     automatically, and deliberately not an error the caller sees: the review
 //     succeeded.
-func (p *Pipeline) submitVerdict(ctx context.Context, rec *store.Review, ref prref.PRRef, v review.Verdict) {
+//
+// verdictGate carries the two facts that can override an approve.
+//
+// They are firstpass's to decide, not the reviewer's, because they are about
+// what firstpass knows rather than about the code: whether a human is already
+// blocking, and whether the list of prior feedback it showed the reviewer was
+// complete. An approval that rests on evidence firstpass failed to gather is
+// worse than no approval at all, and one submitted over a colleague's request
+// for changes is worse still -- it reads, under the operator's own identity,
+// as clearing somebody else's block.
+type verdictGate struct {
+	feedbackUsable   bool
+	changesRequested bool
+}
+
+// withheldReason returns why an approve must not be submitted, or "" when it
+// may be.
+func (g verdictGate) withheldReason() string {
+	switch {
+	case g.changesRequested:
+		return "a reviewer has requested changes on this pull request and that request is still " +
+			"outstanding"
+	case !g.feedbackUsable:
+		return "firstpass could not read the full list of feedback already on this pull request, " +
+			"so it cannot confirm that everything raised has been addressed"
+	}
+	return ""
+}
+
+func (p *Pipeline) submitVerdict(ctx context.Context, rec *store.Review, ref prref.PRRef,
+	v review.Verdict, gate verdictGate) {
+
 	var event, body string
 	var submitted store.Verdict
 	switch v {
 	case review.VerdictApprove:
+		if reason := gate.withheldReason(); reason != "" {
+			// The reviewer read the code and decided approve. firstpass is not
+			// second-guessing that judgement -- it is declining to turn it into
+			// an approving review on GitHub, which is a different act.
+			p.Log.Warn("approval withheld", "key", ref.Key(), "reason", reason)
+			rec.Verdict = store.VerdictWithheld
+			rec.Detail = "the review raised nothing needing a change, but no approval was " +
+				"submitted: " + reason
+			if p.Cfg.DryRun {
+				return
+			}
+			event, body, submitted = ghpr.ReviewComment, verdictBodyWithheld(rec.Pass, reason),
+				store.VerdictWithheld
+			break
+		}
 		event, body, submitted = ghpr.ReviewApprove, verdictBodyApprove(rec.Pass), store.VerdictApproved
 	case review.VerdictFindings:
 		event, body, submitted = ghpr.ReviewComment, verdictBodyFindings(rec.Pass), store.VerdictFindings

@@ -34,7 +34,7 @@ func TestDryRunReportWriteFailureIsDistinguishableFromAReviewFailure(t *testing.
 	}}
 	rr := New(f, "claude", nil, true, blockedReportsDir(t))
 
-	res, err := rr.Run(context.Background(), "work", ref, nil)
+	res, err := rr.Run(context.Background(), "work", ref, nil, nil)
 	if err == nil {
 		t.Fatal("a report that could not be written must still be surfaced")
 	}
@@ -69,7 +69,7 @@ func TestReviewFailureIsNotAReportError(t *testing.T) {
 			f := &runner.Fake{Replies: []runner.Reply{tc.reply}}
 			rr := New(f, "claude", nil, tc.dry, t.TempDir())
 
-			_, err := rr.Run(context.Background(), "work", ref, nil)
+			_, err := rr.Run(context.Background(), "work", ref, nil, nil)
 			if err == nil {
 				t.Fatal("a failed review must be an error so the pipeline records needs_attention")
 			}
@@ -95,7 +95,7 @@ func TestDryRunWithNonZeroExitStillWritesAReport(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, true, dir)
 
-	res, err := rr.Run(context.Background(), "work", ref, nil)
+	res, err := rr.Run(context.Background(), "work", ref, nil, nil)
 	if err == nil {
 		t.Fatal("a non-zero exit must still be an error")
 	}
@@ -122,7 +122,7 @@ func TestDryRunWithNoOutputStillWritesAReportNamingTheFailure(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, true, dir)
 
-	res, err := rr.Run(context.Background(), "work", ref, nil)
+	res, err := rr.Run(context.Background(), "work", ref, nil, nil)
 	if err == nil {
 		t.Fatal("a killed review must be an error")
 	}
@@ -159,7 +159,7 @@ func TestALiveFailureKeepsWhatItPrinted(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, false, dir)
 
-	res, err := rr.Run(context.Background(), "work", ref, nil)
+	res, err := rr.Run(context.Background(), "work", ref, nil, nil)
 	if err == nil {
 		t.Fatal("a non-zero exit must be an error")
 	}
@@ -199,7 +199,7 @@ func TestALiveReportDoesNotClaimNothingWasPosted(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, false, dir)
 
-	res, err := rr.Run(context.Background(), "work", ref, nil)
+	res, err := rr.Run(context.Background(), "work", ref, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

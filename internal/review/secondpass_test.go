@@ -37,7 +37,7 @@ func TestSecondPassNoteReachesTheSystemPromptAndNotThePrompt(t *testing.T) {
 	f := fakeWithReply("posted")
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, false, t.TempDir())
 
-	if _, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}); err != nil {
+	if _, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.Calls) != 1 {
@@ -78,7 +78,7 @@ func TestFirstPassArgvCarriesNoSecondPassNote(t *testing.T) {
 	f := fakeWithReply("no findings")
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, true, t.TempDir())
 
-	if _, err := rr.Run(context.Background(), "work", ref, nil); err != nil {
+	if _, err := rr.Run(context.Background(), "work", ref, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -98,11 +98,11 @@ func TestThePromptIsByteIdenticalAcrossPasses(t *testing.T) {
 	for _, dry := range []bool{true, false} {
 		first, second := fakeWithReply("x"), fakeWithReply("x")
 		if _, err := New(first, "claude", nil, dry, t.TempDir()).
-			Run(context.Background(), "work", ref, nil); err != nil {
+			Run(context.Background(), "work", ref, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := New(second, "claude", nil, dry, t.TempDir()).
-			Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}); err != nil {
+			Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}, nil); err != nil {
 			t.Fatal(err)
 		}
 		a := first.Calls[0].Args[slices.Index(first.Calls[0].Args, "-p")+1]
@@ -141,12 +141,12 @@ func TestADryRunSecondPassReportDoesNotOverwriteTheFirst(t *testing.T) {
 	dir := t.TempDir()
 
 	rr := New(fakeWithReply("first pass findings"), "claude", nil, true, dir)
-	first, err := rr.Run(context.Background(), "work", ref, nil)
+	first, err := rr.Run(context.Background(), "work", ref, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rr = New(fakeWithReply("second pass findings"), "claude", nil, true, dir)
-	second, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true})
+	second, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestTheIncompleteNoteAlsoTravelsAsASystemPromptAndNotInThePrompt(t *testing
 	rr := New(f, "claude", nil, false, t.TempDir())
 	pp := &PreviousPass{HeadSHA: prevSHA, Posted: true, Incomplete: true}
 
-	if _, err := rr.Run(context.Background(), "work", ref, pp); err != nil {
+	if _, err := rr.Run(context.Background(), "work", ref, pp, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -291,7 +291,7 @@ func TestAPreviousPassThatPostedNothingSendsNoNote(t *testing.T) {
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, false, t.TempDir())
 
 	if _, err := rr.Run(context.Background(), "work", ref,
-		&PreviousPass{HeadSHA: prevSHA, Posted: false}); err != nil {
+		&PreviousPass{HeadSHA: prevSHA, Posted: false}, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -311,12 +311,12 @@ func TestAPreviousPassThatPostedNothingSendsNoNote(t *testing.T) {
 func TestAPassAfterAnUnpostedOneStillGetsItsOwnReportName(t *testing.T) {
 	dir := t.TempDir()
 	first, err := New(fakeWithReply("pass one"), "claude", nil, true, dir).
-		Run(context.Background(), "work", ref, nil)
+		Run(context.Background(), "work", ref, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	second, err := New(fakeWithReply("pass two"), "claude", nil, true, dir).
-		Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: false})
+		Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: false}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,9 +368,26 @@ func TestTheNoteForAnUnchangedHeadAsksForAFullReview(t *testing.T) {
 func TestTheMovedHeadNotesStillAskToFocusOnWhatChanged(t *testing.T) {
 	for _, incomplete := range []bool{false, true} {
 		n := secondPassNote(PreviousPass{HeadSHA: prevSHA, Posted: true, Incomplete: incomplete})
-		if !strings.Contains(n, "Concentrate on what has changed since "+prevSHA[:12]) {
-			t.Errorf("incomplete=%v: the moved-head note must still point at what changed:\n%s",
-				incomplete, n)
+		// Comments are still steered at the new commits -- that is what stops a
+		// second pass re-posting the first pass's findings.
+		if !strings.Contains(n, "COMMENTS on what has changed since "+prevSHA[:12]) {
+			t.Errorf("incomplete=%v: the moved-head note must still point comments at what "+
+				"changed:\n%s", incomplete, n)
+		}
+		// And the verdict must NOT be steered there. Conflating the two is the
+		// defect this pairing exists to prevent: an approval covering only the
+		// newest commits while the previous pass's findings sat unaddressed
+		// above it, submitted under the operator's own GitHub identity where it
+		// reads as blessing the whole change.
+		//
+		// Asserted on the separate claims rather than one phrasing, because a
+		// guard in this file has already been fooled once by a reworded
+		// sentence that said the same thing differently.
+		for _, claim := range []string{"whole pull request", "previously raised", "Minor nits"} {
+			if !strings.Contains(n, claim) {
+				t.Errorf("incomplete=%v: the note must scope the verdict to the whole pull "+
+					"request (%q missing):\n%s", incomplete, claim, n)
+			}
 		}
 		if !strings.Contains(n, "may no longer be reachable") {
 			t.Errorf("incomplete=%v: the moved-head note must still explain why it is not a diff:\n%s",

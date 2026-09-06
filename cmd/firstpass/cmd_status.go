@@ -77,6 +77,8 @@ func verdictCell(r store.Review) string {
 		return string(r.Outcome) + " / approved"
 	case r.Verdict == store.VerdictFindings:
 		return string(r.Outcome) + " / findings"
+	case r.Verdict == store.VerdictWithheld:
+		return string(r.Outcome) + " / approval withheld"
 	case r.Verdict == store.VerdictUnknown:
 		return string(r.Outcome) + " / verdict unknown"
 	case r.Outcome == store.OutcomeReviewed:

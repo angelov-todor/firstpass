@@ -90,9 +90,11 @@ type orderedRev struct {
 	verdicts map[string]review.Verdict
 }
 
-func (o *orderedRev) Run(ctx context.Context, dir string, ref prref.PRRef, previous *review.PreviousPass) (review.Result, error) {
+func (o *orderedRev) Run(ctx context.Context, dir string, ref prref.PRRef, previous *review.PreviousPass,
+	prior *review.PriorFeedback) (review.Result, error) {
+
 	*o.log = append(*o.log, "review:"+ref.Key())
-	res, err := o.inner.Run(ctx, dir, ref, previous)
+	res, err := o.inner.Run(ctx, dir, ref, previous, prior)
 	if v, ok := o.verdicts[ref.Key()]; ok {
 		res.Verdict = v
 	}

@@ -54,6 +54,16 @@ const (
 	// the reviewer printed no verdict line firstpass recognised, so nothing
 	// was submitted and nothing was guessed.
 	VerdictUnknown Verdict = "unknown"
+	// VerdictWithheld means the reviewer decided approve and firstpass
+	// declined to submit it: a human has an outstanding request for changes,
+	// or firstpass could not enumerate the feedback already on the pull
+	// request and so cannot support "everything raised has been addressed".
+	//
+	// A distinct value rather than reusing findings or none. Recording it as
+	// findings would claim the reviewer raised something it did not; recording
+	// it as none would lose the reason entirely, which is the one thing an
+	// operator needs when asking why a clean pull request was not approved.
+	VerdictWithheld Verdict = "withheld"
 )
 
 // Review is the record for a pull request firstpass has acted on.

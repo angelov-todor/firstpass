@@ -62,6 +62,14 @@ type fakePRs struct {
 	submitted []submittedVerdict
 	submitErr error
 
+	// feedback is what FetchFeedback returns; feedbackErr makes it fail, which
+	// must leave the review running but unable to approve.
+	feedback    ghpr.Feedback
+	feedbackErr error
+	// feedbackFor records which refs the feedback was fetched for, so a test
+	// can prove a gate that decides without GitHub did not call it.
+	feedbackFor []string
+
 	// inspected records every ref this fake was asked about, in order. Some
 	// gates exist precisely to decide without a GitHub call, so "Inspect was
 	// never called" is the assertion for those -- the outcome alone would be
@@ -86,6 +94,19 @@ func (f *fakePRs) Inspect(_ context.Context, ref prref.PRRef) (ghpr.PRInfo, erro
 		return i, nil
 	}
 	return ghpr.PRInfo{State: "OPEN", Author: "colleague", HeadSHA: "sha-" + ref.Repo}, nil
+}
+
+// FetchFeedback defaults to "no feedback at all, list complete", which is the
+// state in which an approval is allowed. A test that wants the gates to fire
+// sets feedback or feedbackErr.
+func (f *fakePRs) FetchFeedback(_ context.Context, ref prref.PRRef) (ghpr.Feedback, error) {
+	f.mu.Lock()
+	f.feedbackFor = append(f.feedbackFor, ref.Key())
+	f.mu.Unlock()
+	if f.feedbackErr != nil {
+		return ghpr.Feedback{}, f.feedbackErr
+	}
+	return f.feedback, nil
 }
 
 func (f *fakePRs) SubmitReview(_ context.Context, ref prref.PRRef, verdict, body string) error {
@@ -150,12 +171,19 @@ type fakeRev struct {
 	// commit the pass before it looked at and whether that pass finished --
 	// and that a first pass told it nothing at all.
 	prevPasses []*review.PreviousPass
+	// priors records the prior feedback handed to each invocation, so a test
+	// can prove the reviewer was actually shown what is already on the pull
+	// request rather than merely that firstpass fetched it.
+	priors []*review.PriorFeedback
 }
 
-func (f *fakeRev) Run(ctx context.Context, _ string, ref prref.PRRef, previous *review.PreviousPass) (review.Result, error) {
+func (f *fakeRev) Run(ctx context.Context, _ string, ref prref.PRRef, previous *review.PreviousPass,
+	prior *review.PriorFeedback) (review.Result, error) {
+
 	f.mu.Lock()
 	f.ran = append(f.ran, ref.Key())
 	f.prevPasses = append(f.prevPasses, previous)
+	f.priors = append(f.priors, prior)
 	f.mu.Unlock()
 
 	if f.duringRun != nil {

@@ -27,13 +27,29 @@ import (
 
 const verdictKey = "example-org/aex-balances#12"
 
-// ghFake replies to the two gh commands a reviewed PR involves. "pr view" is
-// not a substring of "gh pr review 12", so the two replies never collide.
+// emptyFeedbackJSON is a pull request nobody has commented on: no threads, no
+// reviews, no comments, and review still required. It is the state in which an
+// approval is permitted, so it is the right default for tests about verdicts.
+//
+// A reply for it is mandatory rather than optional. Without one the GraphQL
+// call fails, and a failed feedback fetch withholds the approval by design --
+// which is how these tests failed when the gates first landed. That is the
+// safety property doing its job, and the fixture is what lets a test about
+// approval bodies be about approval bodies.
+const emptyFeedbackJSON = `{"data":{"repository":{"pullRequest":{` +
+	`"reviewDecision":"REVIEW_REQUIRED",` +
+	`"reviewThreads":{"totalCount":0,"nodes":[]},` +
+	`"reviews":{"totalCount":0,"nodes":[]},` +
+	`"comments":{"totalCount":0,"nodes":[]}}}}}`
+
+// ghFake replies to the gh commands a reviewed PR involves. "pr view" is not a
+// substring of "gh pr review 12", so the replies never collide.
 func ghFake(reviewResult runner.Result) *runner.Fake {
 	const prJSON = `{"state":"OPEN","isDraft":false,"author":{"login":"colleague"},"headRefOid":"sha1"}`
 	return &runner.Fake{Replies: []runner.Reply{
 		{Match: "pr view", Result: runner.Result{Stdout: []byte(prJSON)}},
 		{Match: "pr review", Result: reviewResult},
+		{Match: "graphql", Result: runner.Result{Stdout: []byte(emptyFeedbackJSON)}},
 	}}
 }
 

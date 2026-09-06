@@ -53,6 +53,29 @@ One sweep, on a ticker or on demand:
    take it out. Every verdict body says in its first sentence that it is
    machine-written. A dry run submits nothing and its report says what the
    verdict would have been.
+
+   **An approval covers the whole pull request.** Before the review runs,
+   firstpass enumerates every piece of feedback already on the PR — unresolved
+   and resolved inline threads, review bodies, and plain comments, from your
+   colleagues as well as from its own earlier passes — and hands the reviewer
+   an index of it. `approve` is only correct when the current code is sound
+   *and* every previously raised point that required a change has been
+   addressed. Minor nits do not block it.
+
+   Two things override an `approve` regardless of what the reviewer decided,
+   because they are about what firstpass knows rather than about the code:
+
+   - **A human has requested changes.** firstpass never submits an approval
+     over an outstanding `CHANGES_REQUESTED`; under your identity that reads as
+     you clearing a colleague's block.
+   - **The feedback could not be read.** An approval asserts that everything
+     raised has been addressed, and that assertion rests entirely on the list
+     firstpass gathered. If the list failed or came back incomplete, the review
+     still runs and still comments — but it cannot approve.
+
+   Either case records `approval withheld` in `status` and posts a comment
+   review saying the review found nothing to change and why it is not
+   approving anyway.
 8. Live, the chat message that carried the link gets a reaction, so the team
    can see the PR has been picked up and, later, how it came out.
 

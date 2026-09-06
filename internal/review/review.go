@@ -286,6 +286,22 @@ type PreviousPass struct {
 //
 // It is deliberately not called at all when the earlier pass posted nothing;
 // see Run and PreviousPass.Posted.
+// verdictScopeNote separates what a later pass comments on from what its
+// verdict covers, and it exists because conflating the two produced an
+// approval that meant far less than it looked like.
+//
+// A later pass is told to concentrate on the newest commits and not to restate
+// earlier findings -- correct for comments, and quietly disastrous for the
+// verdict. An approval on pass 2 meant "the commits since pass 1 raised
+// nothing" while pass 1's findings could sit unaddressed above it, and the
+// approval was submitted under the operator's own GitHub identity where it
+// reads as blessing the whole change.
+const verdictScopeNote = "Your VERDICT is a separate question from what you comment on, and it " +
+	"covers the whole pull request as it now stands -- not only the newest commits. Print " +
+	"`approve` only if the current code is sound AND every previously raised point that requires " +
+	"a change has been addressed in it, including points raised by your earlier passes and by " +
+	"human reviewers. Minor nits need not block an approval."
+
 func secondPassNote(pp PreviousPass) string {
 	short := ShortSHA(pp.HeadSHA)
 
@@ -311,24 +327,25 @@ func secondPassNote(pp PreviousPass) string {
 			"Before you post a finding, check whether that comment is already on the pull " +
 			"request, and do not post it again if it is: a second copy of the same comment on " +
 			"the same line spends the author's time twice on one point. Everything else, raise " +
-			"as you normally would."
+			"as you normally would.\n\n" + verdictScopeNote
 	}
 
 	head := "A previous automated pass already reviewed this pull request at commit " + short +
 		" and posted its findings as inline comments on it.\n\n" +
-		"Concentrate on what has changed since " + short + ". Do not restate findings from that " +
-		"pass: they are already on the pull request, and repeating one puts a second copy of the " +
-		"same comment on the same line, which spends the author's time twice on one point."
+		"Concentrate your COMMENTS on what has changed since " + short + ". Do not restate " +
+		"findings from that pass: they are already on the pull request, and repeating one puts a " +
+		"second copy of the same comment on the same line, which spends the author's time twice " +
+		"on one point.\n\n" + verdictScopeNote
 	if pp.Incomplete {
 		head = "A previous automated pass began reviewing this pull request at commit " + short +
 			" and did not finish. Some of its findings may already be posted as inline comments " +
 			"on the pull request and some may not: it was posting them one at a time when it " +
 			"stopped, and firstpass cannot tell how far it got.\n\n" +
-			"Concentrate on what has changed since " + short + ". Before you post a finding, " +
-			"check whether that comment is already on the pull request, and do not post it again " +
-			"if it is: a second copy of the same comment on the same line spends the author's " +
-			"time twice on one point. Where a finding is not already there, raise it -- the " +
-			"earlier pass may never have got to it."
+			"Concentrate your COMMENTS on what has changed since " + short + ". Before you post " +
+			"a finding, check whether that comment is already on the pull request, and do not " +
+			"post it again if it is: a second copy of the same comment on the same line spends " +
+			"the author's time twice on one point. Where a finding is not already there, raise " +
+			"it -- the earlier pass may never have got to it.\n\n" + verdictScopeNote
 	}
 
 	return head + "\n\n" +
@@ -364,7 +381,9 @@ func (e *ReportError) Unwrap() error { return e.Err }
 // nil means this is the first pass. It changes only the system prompt and the
 // dry-run report's filename: the -p value is byte-identical across passes,
 // because everything in it is /code-review's own arguments.
-func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous *PreviousPass) (Result, error) {
+func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous *PreviousPass,
+	prior *PriorFeedback) (Result, error) {
+
 	system := verdictInstruction
 	// Posted is a gate, not merely a wording input. An earlier pass that
 	// posted nothing left nothing on the pull request to duplicate and nothing
@@ -374,10 +393,19 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 	if previous != nil && previous.Posted {
 		system += "\n\n" + secondPassNote(*previous)
 	}
+	// The index of existing feedback is evidence, so it goes in the system
+	// prompt; the demand it supports goes in the -p value, next to the verdict
+	// ask. Splitting them that way is not tidiness -- it is what this project
+	// measured: an instruction in the system prompt is not reliably followed
+	// over a long agentic run, while data there is simply available.
+	if note := priorNote(prior); note != "" {
+		system += "\n\n" + note
+	}
+
 	// extraArgs stays last: it is operator-controlled config, so it must keep
 	// being able to override anything firstpass sets for itself.
 	args := append([]string{
-		"-p", rr.Prompt(ref),
+		"-p", rr.Prompt(ref) + priorClause(prior),
 		"--append-system-prompt", system,
 	}, rr.extraArgs...)
 
