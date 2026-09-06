@@ -5,7 +5,7 @@ A machine pass over a PR ahead of human review — and again when it changes.
 `firstpass` is a Go daemon for Windows that watches a Google Chat space for
 posted GitHub pull request links and, for each newly posted PR, runs a
 [Claude Code](https://claude.com/product/claude-code) review in an isolated
-git worktree and posts the findings as inline comments on the PR.
+git worktree and posts the findings as a comment on the PR.
 
 The name is about position, not count: each pass is the first automated look
 at the commits it reviews, ahead of a human. A re-posted PR with new commits
@@ -63,7 +63,7 @@ One sweep, on a ticker or on demand:
    under the old slash command, dry run was expressed by withholding a
    `--comment` flag that the command never actually read, so the only thing
    keeping a dry run quiet was that the reviewer happened not to post. Live,
-   the reviewer is told to post each finding as an inline comment — and
+   the reviewer is told to post its findings in one comment — and
    firstpass writes a report anyway in the two live cases it could not otherwise
    explain: a review that finished without a verdict line, and one that did
    not finish at all. A live report says plainly that its comments are
@@ -120,7 +120,7 @@ The dedupe rule is **once per commit, on a re-post** — not once per pull
 request. A PR posted to the space again is reviewed again, but only if it has
 new commits since the pass that already reviewed it.
 
-**A second pass posts a fresh set of inline comments.** It is a whole review,
+**A second pass posts a fresh comment.** It is a whole review,
 not an increment: the reviewer is told a previous pass ran and asked to
 concentrate on what has changed and not to restate that pass's findings, but
 nothing enforces it. Expect new comments on the pull request, and a new
@@ -487,7 +487,8 @@ Read this before running anything other than `doctor` or `scan -print-only`.
   filtering were checked against 200 messages of real chat history, and a
   dry-run `replay` produced a substantive report in 12m15s, which is why
   `review_timeout` defaults to 30m. Comments have since been posted live: on
-  a 7-file, +539/−12 pull request firstpass left three inline comments,
+  a 7-file, +539/−12 pull request firstpass left three inline comments (under
+  the earlier per-line posting, since replaced by one comment per review),
   including one that falsified a security claim in the PR's own description,
   one `IsSuccessStatusCode` trap where a 2xx with an undeserialisable body
   silently skips an audit-trail write, and one null dereference whose broad

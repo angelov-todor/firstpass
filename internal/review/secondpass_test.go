@@ -119,7 +119,12 @@ func TestThePromptIsByteIdenticalAcrossPasses(t *testing.T) {
 // finding on the same line it used last time.
 func TestSecondPassNoteNamesThePreviousCommitAndForbidsRestating(t *testing.T) {
 	n := secondPassNote(PreviousPass{HeadSHA: prevSHA, Posted: true})
-	for _, want := range []string{"previous automated pass", "inline comments", prevSHA[:12]} {
+	// "in a comment", not "inline comments": findings are posted as one comment
+	// on the pull request now, at the owner's request, and a note that sends
+	// the reviewer looking for per-line comments will find none and re-raise
+	// the previous pass's findings -- the duplicate set this note exists to
+	// prevent.
+	for _, want := range []string{"previous automated pass", "in a comment", prevSHA[:12]} {
 		if !strings.Contains(n, want) {
 			t.Errorf("the note must say %q:\n%s", want, n)
 		}
@@ -207,7 +212,12 @@ func TestTheNoteForAnIncompletePreviousPassAdmitsTheUncertainty(t *testing.T) {
 			}
 			// And it must still say how to avoid the duplicate, or the
 			// uncertainty turns into either a second comment or silence.
-			if !strings.Contains(inc, "check whether that comment is already on the pull request") {
+			// One comment is atomic: an interrupted pass either posted it or
+			// did not, which is a simpler uncertainty than the old "some
+			// findings may be posted and some may not". What the reviewer must
+			// still be told is to look before restating.
+			if !strings.Contains(inc, "Look for that pass's comment") &&
+				!strings.Contains(inc, "already in that pass's comment") {
 				t.Errorf("the reviewer must be told how to avoid duplicating a comment that did "+
 					"land:\n%s", inc)
 			}
@@ -233,15 +243,24 @@ func TestTheNoteForAnIncompletePreviousPassAdmitsTheUncertainty(t *testing.T) {
 // to keep the hedge or trip one of these.
 func assertAdmitsUncertainty(t *testing.T, note string) {
 	t.Helper()
-	for _, want := range []string{
-		"did not finish",
-		"may already be posted",
-		"and some may not",
-		"cannot tell how far it got",
-	} {
-		if !strings.Contains(note, want) {
-			t.Errorf("an incomplete pass's note must say %q:\n%s", want, note)
-		}
+	// The uncertainty got simpler when findings became one comment rather than
+	// one per line. It used to be "some of its findings may be posted and some
+	// may not", because a pass killed mid-post had posted a prefix of them. A
+	// single comment is atomic: it either landed or it did not, and firstpass
+	// still cannot tell which.
+	//
+	// The shape asserted is the shape that matters -- the note admits it does
+	// not know -- rather than one phrasing of it. This guard has been fooled
+	// once already by a reworded sentence that said the same thing.
+	if !strings.Contains(note, "did not finish") {
+		t.Errorf("an incomplete pass's note must say it did not finish:\n%s", note)
+	}
+	if !strings.Contains(note, "may or may not") && !strings.Contains(note, "may already be posted") {
+		t.Errorf("an incomplete pass's note must admit it does not know whether the findings "+
+			"were posted:\n%s", note)
+	}
+	if !strings.Contains(note, "cannot tell") {
+		t.Errorf("an incomplete pass's note must say firstpass cannot tell:\n%s", note)
 	}
 	for _, claim := range []*regexp.Regexp{
 		regexp.MustCompile(`(?i)posted its findings`),
@@ -351,8 +370,9 @@ func TestTheNoteForAnUnchangedHeadAsksForAFullReview(t *testing.T) {
 		if !strings.Contains(n, "review it in full") {
 			t.Errorf("incomplete=%v: the reviewer must be asked for a full review:\n%s", incomplete, n)
 		}
-		if !strings.Contains(n, "already on the pull request") {
-			t.Errorf("incomplete=%v: the duplicate-comment hazard is the one thing still worth "+
+		if !strings.Contains(n, "already in that pass's comment") &&
+			!strings.Contains(n, "Look for that pass's comment") {
+			t.Errorf("incomplete=%v: the duplicate-finding hazard is the one thing still worth "+
 				"saying:\n%s", incomplete, n)
 		}
 		// The "not a diff against X" paragraph is about a commit that may have

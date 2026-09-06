@@ -36,8 +36,9 @@ type Result struct {
 // to change something?".
 //
 // firstpass is deliberately ignorant of the findings themselves — the
-// reviewer posts them as inline comments and firstpass sees only the exit code
-// and stdout — so this one line is the whole channel between the two.
+// reviewer posts them in a comment on the pull request and firstpass sees only
+// the exit code and stdout — so this one line is the whole channel between the
+// two.
 // Deciding the verdict is the reviewer's job; submitting it is firstpass's.
 type Verdict string
 
@@ -47,10 +48,12 @@ const (
 	// submits nothing rather than guess, because the wrong guess is an
 	// approval on a colleague's pull request.
 	VerdictUnknown Verdict = "unknown"
-	// VerdictApprove means nothing needing change was raised: no findings, or
-	// only minor nits.
+	// VerdictApprove means nothing needing a change was raised: no findings at
+	// all, or only suggestion-level ones. Nits, style and nice-to-haves do not
+	// withhold an approval; they are posted alongside it.
 	VerdictApprove Verdict = "approve"
-	// VerdictFindings means something Critical or Important was raised.
+	// VerdictFindings means something blocking or important was raised. A
+	// suggestion alone is not enough: see VerdictApprove.
 	VerdictFindings Verdict = "findings"
 )
 
@@ -424,28 +427,25 @@ func secondPassNote(pp PreviousPass) string {
 		return "A previous automated pass " + what + " Nothing has changed since, so review it " +
 			"in full: this pass was asked for deliberately, and a review that held its findings " +
 			"back because an earlier one might have had them would say nothing at all.\n\n" +
-			"Before you post a finding, check whether that comment is already on the pull " +
-			"request, and do not post it again if it is: a second copy of the same comment on " +
-			"the same line spends the author's time twice on one point. Everything else, raise " +
-			"as you normally would.\n\n" + verdictScopeNote
+			"Before you raise a finding, check whether it is already in that pass's comment " +
+			"on the pull request, and leave it out if it is: repeating a point spends the " +
+			"author's time twice on it. Everything else, raise as you normally would.\n\n" +
+			verdictScopeNote
 	}
 
 	head := "A previous automated pass already reviewed this pull request at commit " + short +
-		" and posted its findings as inline comments on it.\n\n" +
+		" and posted its findings in a comment on it.\n\n" +
 		"Concentrate your COMMENTS on what has changed since " + short + ". Do not restate " +
-		"findings from that pass: they are already on the pull request, and repeating one puts a " +
-		"second copy of the same comment on the same line, which spends the author's time twice " +
-		"on one point.\n\n" + verdictScopeNote
+		"findings from that pass: they are already in that comment, and repeating one spends the " +
+		"author's time twice on the same point.\n\n" + verdictScopeNote
 	if pp.Incomplete {
 		head = "A previous automated pass began reviewing this pull request at commit " + short +
-			" and did not finish. Some of its findings may already be posted as inline comments " +
-			"on the pull request and some may not: it was posting them one at a time when it " +
-			"stopped, and firstpass cannot tell how far it got.\n\n" +
-			"Concentrate your COMMENTS on what has changed since " + short + ". Before you post " +
-			"a finding, check whether that comment is already on the pull request, and do not " +
-			"post it again if it is: a second copy of the same comment on the same line spends " +
-			"the author's time twice on one point. Where a finding is not already there, raise " +
-			"it -- the earlier pass may never have got to it.\n\n" + verdictScopeNote
+			" and did not finish. It may or may not have got as far as posting its findings, " +
+			"and firstpass cannot tell which.\n\n" +
+			"Concentrate your COMMENTS on what has changed since " + short + ". Look for that " +
+			"pass's comment on the pull request: if it is there, do not restate what is in it; " +
+			"if it is not, that pass posted nothing and everything it would have found is still " +
+			"worth raising.\n\n" + verdictScopeNote
 	}
 
 	return head + "\n\n" +
@@ -577,14 +577,24 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 		// reviewer had printed is the only evidence of how far it actually
 		// got.
 		//
-		// VerdictFindings is included for a reason that only appeared once the
-		// slash command went away. Posting is now a prose instruction, and the
-		// skills a general prompt selects do not necessarily post -- the .NET
-		// review skill produces a report and posts nothing at all. So a live
-		// review can finish, print `findings`, and leave nothing on the pull
-		// request; discarding its output would lose the findings entirely and
-		// silently. Keeping it costs one file per review with findings.
-		if runErr != nil || out.Verdict == VerdictUnknown || out.Verdict == VerdictFindings {
+		// Every live outcome keeps its output, and the condition is gone
+		// entirely rather than listing which ones.
+		//
+		// Two changes brought it here. Posting became a prose instruction when
+		// the slash command went away, and the skills a general prompt selects
+		// do not necessarily post -- the .NET review skill produces a report
+		// and posts nothing at all. And an `approve` stopped meaning "nothing
+		// was found": under the current rule a pull request whose every finding
+		// is a suggestion is an approval, with those suggestions posted
+		// alongside it.
+		//
+		// Put together, there is no live outcome with provably nothing to
+		// preserve. An approve that carried three suggestions the reviewer
+		// reported instead of posting would, under the old condition, have
+		// been recorded as "No findings needing a change" with the suggestions
+		// discarded -- the tool looking like it found nothing when it had.
+		// Keeping the output costs one small file per review.
+		{
 			if path, werr := rr.writeReport(ref, previous, res.Stdout, res.Stderr, out.Verdict, runErr); werr == nil {
 				out.ReportPath = path
 			}
