@@ -235,16 +235,16 @@ func TestABodyDoesNotClaimFindingsWerePostedWhenTheyWereNot(t *testing.T) {
 	}
 	body := strings.Join(ghReviewCalls(f)[0].Args, " ")
 
-	if strings.Contains(body, "The findings are posted as inline comments on this pull request.") {
+	if strings.Contains(body, "Findings are posted in a comment on this pull request") {
 		t.Errorf("the body asserts the findings are posted when nothing was:\n%s", body)
 	}
-	if !strings.Contains(body, "could not confirm that the findings were posted") {
+	if !strings.Contains(body, "could not confirm they") {
 		t.Errorf("the body must say plainly that posting was not confirmed:\n%s", body)
 	}
 	// And it must tell the reader what to do instead, or the hedge is just
 	// doubt with no way out of it.
-	if !strings.Contains(body, "report on the operator's machine") {
-		t.Errorf("the body must say where the findings are instead:\n%s", body)
+	if !strings.Contains(body, "ask the operator for the review report") {
+		t.Errorf("the body must say how to get the findings instead:\n%s", body)
 	}
 	// The verdict itself is unaffected: findings is still findings.
 	if rec := reviewRecord(t, h); rec.Verdict != store.VerdictFindings {
@@ -267,7 +267,7 @@ func TestABodySaysTheFindingsArePostedWhenTheyAre(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := strings.Join(ghReviewCalls(f)[0].Args, " ")
-	if !strings.Contains(body, "The findings are posted as inline comments on this pull request.") {
+	if !strings.Contains(body, "Findings are posted in a comment on this pull request") {
 		t.Errorf("a confirmed post must be stated plainly:\n%s", body)
 	}
 	if strings.Contains(body, "could not confirm") {

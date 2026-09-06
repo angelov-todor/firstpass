@@ -1,6 +1,6 @@
 package review
 
-// The verdict: /code-review posts its findings itself, so firstpass sees only
+// The verdict: the reviewer posts its findings itself, so firstpass sees only
 // the exit code and stdout. One machine-readable line is the whole channel
 // between what the reviewer concluded and what firstpass submits, which is why
 // its parsing is strict and never guesses.
@@ -38,8 +38,9 @@ func TestParseVerdictToleratesSurroundingWhitespace(t *testing.T) {
 	}
 }
 
-// No line at all is the case that actually happened: /code-review found
-// nothing and said nothing. It must not become an approval by default.
+// No line at all is the case that actually happened, fourteen times: the
+// review finished and printed no verdict line. It must not become an approval
+// by default.
 func TestParseVerdictWithNoLineIsUnknown(t *testing.T) {
 	if got := ParseVerdict([]byte("I reviewed the diff and found nothing.\n")); got != VerdictUnknown {
 		t.Errorf("ParseVerdict() = %q, want %q", got, VerdictUnknown)
@@ -130,12 +131,26 @@ func TestVerdictInstructionStatesTheProtocolAndTheSeverityRule(t *testing.T) {
 		"FIRSTPASS-VERDICT: approve",
 		"FIRSTPASS-VERDICT: findings",
 		"last line of your output",
-		"Critical or Important",
+		// The severity rule, in the taxonomy the prompt now asks for and the
+		// .NET review skill already uses. "Critical or Important" stood here
+		// before and left the boundary to interpretation; the owner's rule is
+		// that only blocking or important withholds an approval, and nits do
+		// not.
+		"blocking or important",
 		"nits",
 	} {
 		if !strings.Contains(verdictInstruction, want) {
 			t.Errorf("the verdict instruction is missing %q:\n%s", want, verdictInstruction)
 		}
+	}
+	// And the rule must be stated as a restriction, not a suggestion: a
+	// reviewer that reads "print findings if you raised anything" will withhold
+	// approval for a style nit, which is exactly what the owner asked to stop.
+	if !strings.Contains(verdictInstruction, "only if") {
+		t.Errorf("the rule must bound when findings is correct:\n%s", verdictInstruction)
+	}
+	if !strings.Contains(verdictInstruction, "do not withhold an approval") {
+		t.Errorf("the instruction must say plainly that nits do not block:\n%s", verdictInstruction)
 	}
 }
 
@@ -250,5 +265,59 @@ func TestDryRunReportStatesTheWouldBeVerdict(t *testing.T) {
 				t.Errorf("report must say what the verdict would have been, missing %q:\n%s", tc.want, body)
 			}
 		})
+	}
+}
+
+// TestThePromptCarriesTheSeverityRuleAndTheFormat covers the half of this
+// protocol that had no test at all.
+//
+// verdictInstruction was asserted; the -p value was not. That is exactly
+// backwards, because this project's own evidence is that the system prompt is
+// the channel the reviewer does not reliably follow -- fourteen production
+// reviews printed no verdict line while the instruction sat there. Removing
+// `+ findingFormat` from Prompt left the suite green.
+func TestThePromptCarriesTheSeverityRuleAndTheFormat(t *testing.T) {
+	for _, dry := range []bool{true, false} {
+		got := New(&runner.Fake{}, "claude", nil, dry, t.TempDir()).Prompt(ref)
+
+		// The format, because firstpass cannot see a finding and so cannot
+		// tell a nit from a blocker except through the label the reviewer
+		// puts on it. Skill selection was supposed to supply this and does
+		// not reliably: the first live review under the general prompt loaded
+		// no skill, because that repository's own CLAUDE.md gave the model
+		// everything it needed to review directly.
+		for _, want := range []string{"exactly one severity", "blocking", "important", "suggestion"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("dryRun=%v: the prompt must ask for a severity per finding (%q missing): %q",
+					dry, want, got)
+			}
+		}
+
+		// The rule, stated as a restriction. "Print findings if the review
+		// raised anything Critical or Important" is what let a reviewer
+		// withhold an approval over a style nit, which is the behaviour the
+		// owner asked to stop.
+		if !strings.Contains(got, "ONLY if") {
+			t.Errorf("dryRun=%v: the prompt must bound when findings is correct: %q", dry, got)
+		}
+		if !strings.Contains(got, "do not withhold an approval") {
+			t.Errorf("dryRun=%v: the prompt must say plainly that nits do not block: %q", dry, got)
+		}
+		// And it must say what happens to those nits instead, or a reviewer
+		// reading "nits do not block" may simply drop them.
+		if !strings.Contains(got, "posted alongside") {
+			t.Errorf("dryRun=%v: the prompt must say suggestions are still posted: %q", dry, got)
+		}
+	}
+}
+
+// The nudge toward installed skills stays in the prompt even though nothing
+// depends on it any more. It costs a sentence and it is what produced the
+// .NET-aware review in the fixture; what changed is that the output shape no
+// longer rests on it.
+func TestThePromptStillAsksForApplicableSkills(t *testing.T) {
+	got := New(&runner.Fake{}, "claude", nil, true, t.TempDir()).Prompt(ref)
+	if !strings.Contains(got, "installed review skills") {
+		t.Errorf("the prompt should still invite the repository's own review skills: %q", got)
 	}
 }

@@ -171,39 +171,71 @@ func TestLiveFindingsVerdictSubmitsACommentReview(t *testing.T) {
 	}
 }
 
-// The operator's colleagues see these under the operator's own GitHub account,
-// so the body has to say what wrote it in its first sentence.
-func TestVerdictBodiesSayTheyAreMachineWritten(t *testing.T) {
+// TestVerdictBodiesCarryNoBoilerplate is what became of a test that required
+// every body to announce it was machine-written.
+//
+// That sentence, the pass number, the link back to this repository and a
+// second disclaimer were all removed at the owner's instruction: the team
+// knows these reviews are automated, and every one of these bodies is a
+// comment on somebody else's pull request, where boilerplate above the point
+// teaches a reader to skip the whole thing.
+//
+// So the assertion inverts. The body must get to the point and carry none of
+// it. Worth being explicit that this is a deliberate trade rather than an
+// oversight: submitted under the operator's own GitHub identity, nothing in
+// these bodies now distinguishes them from a review that person wrote by hand.
+func TestVerdictBodiesCarryNoBoilerplate(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		body  string
 		first string
 	}{
-		{"approve", verdictBodyApprove(1),
-			"Automated first pass by firstpass — no findings. This is machine-written, not a human review."},
-		{"findings", verdictBodyFindings(1, true),
-			"Automated first pass by firstpass — findings raised. This is machine-written and is not a substitute for human review."},
+		{"approve", verdictBodyApprove(1), "No findings needing a change."},
+		{"findings", verdictBodyFindings(1, true), "Findings are posted in a comment"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.HasPrefix(tc.body, tc.first) {
 				t.Errorf("the body must open with %q, got %q", tc.first, tc.body)
 			}
-			if !strings.Contains(tc.body, "https://github.com/angelov-todor/firstpass") {
-				t.Errorf("the body must name what produced it: %q", tc.body)
+			for _, unwanted := range []string{"machine-written", "firstpass —", "Automated review"} {
+				if strings.Contains(tc.body, unwanted) {
+					t.Errorf("the body must not carry %q: %q", unwanted, tc.body)
+				}
+			}
+			// The link back to this repository used to be here and was
+			// removed at the owner's request, along with the pass number and a
+			// second sentence of disclaimer. Every one of these bodies is a
+			// comment on somebody else's pull request, and boilerplate above
+			// the actual point is how a reader learns to skip the whole thing.
+			// What must survive is the one thing a reader cannot work out for
+			// themselves: a machine wrote it.
+			if strings.Contains(tc.body, "https://github.com/") {
+				t.Errorf("the body must not carry a link back to the tool: %q", tc.body)
+			}
+			if strings.Contains(tc.body, "first pass") {
+				t.Errorf("the body must not frame itself as a numbered pass: %q", tc.body)
 			}
 		})
 	}
 }
 
-// /code-review posts each inline comment as its own review event, so the
-// findings do not hang off the verdict review. Saying they did would send a
-// colleague looking for comments that are not there.
+// The findings do not hang off the verdict review: the reviewer posts them as
+// their own comment on the pull request, and firstpass submits the review
+// separately. Saying they were attached here would send a colleague looking
+// where they are not.
+//
+// The wording this checks has moved twice -- inline comments per line under
+// the slash command, then one comment on the pull request at the owner's
+// request -- so it asserts the two properties rather than a phrase: the body
+// must not claim the findings are part of this review, and it must say where
+// they actually are.
 func TestTheFindingsBodyDoesNotClaimTheCommentsAreOnThisReview(t *testing.T) {
-	if strings.Contains(verdictBodyFindings(1, true), "on this review") {
-		t.Errorf("the findings are not comments on this review: %q", verdictBodyFindings(1, true))
+	body := verdictBodyFindings(1, true)
+	if strings.Contains(body, "on this review") {
+		t.Errorf("the findings are not comments on this review: %q", body)
 	}
-	if !strings.Contains(verdictBodyFindings(1, true), "inline comments on this pull request") {
-		t.Errorf("the body must say where the findings actually are: %q", verdictBodyFindings(1, true))
+	if !strings.Contains(body, "on this pull request") {
+		t.Errorf("the body must say where the findings actually are: %q", body)
 	}
 }
 
@@ -483,28 +515,37 @@ func TestPrintOnlySubmitsNoVerdict(t *testing.T) {
 	}
 }
 
-// TestALaterPassDoesNotCallItselfTheFirst is the fix for text that was about
-// to go onto colleagues' pull requests.
+// TestNoBodyCallsItselfAPass is what remains of a test about pass numbering.
 //
-// The bodies were constants reading "Automated first pass by firstpass".
-// Re-reviews have been live for days -- production records show passes 2, 3
-// and 5 -- so the fifth review of a pull request would have introduced itself
-// as the first. The only reason it never did is that no verdict was ever
-// submitted, which was a separate bug; fixing that one armed this one.
-func TestALaterPassDoesNotCallItselfTheFirst(t *testing.T) {
-	for _, pass := range []int{2, 3, 5} {
-		for _, body := range []string{verdictBodyApprove(pass), verdictBodyFindings(pass, true)} {
+// The bodies used to open "Automated first pass by firstpass", which became
+// false the moment re-reviews shipped -- production has produced passes 2, 3
+// and 5. The fix at the time was to number them. The owner has since asked for
+// the numbering gone entirely, along with the link back to this repository, on
+// the grounds that a comment on somebody else's pull request should get to the
+// point.
+//
+// So the assertion inverts: no body may claim to be a first pass, and none may
+// carry a pass number either. What the reader needs about ordering is not
+// which pass this was but what the pass covered, which is the next test.
+func TestNoBodyCallsItselfAPass(t *testing.T) {
+	for _, pass := range []int{1, 2, 3, 5} {
+		bodies := []string{
+			verdictBodyApprove(pass),
+			verdictBodyFindings(pass, true),
+			verdictBodyFindings(pass, false),
+			verdictBodyWithheld(pass, "a reviewer has requested changes"),
+		}
+		for _, body := range bodies {
 			if strings.Contains(body, "first pass") {
-				t.Errorf("pass %d body still calls itself the first pass:\n%s", pass, body)
+				t.Errorf("pass %d body calls itself the first pass:\n%s", pass, body)
 			}
-			if !strings.Contains(body, fmt.Sprintf("pass %d", pass)) {
-				t.Errorf("pass %d body must say which pass it is:\n%s", pass, body)
+			if strings.Contains(body, fmt.Sprintf("pass %d", pass)) {
+				t.Errorf("pass %d body numbers itself; the owner asked for that gone:\n%s", pass, body)
+			}
+			if strings.Contains(body, "machine-written") {
+				t.Errorf("pass %d body still carries the disclaimer that was removed:\n%s", pass, body)
 			}
 		}
-	}
-	// Pass 1 keeps the wording that is true of it.
-	if !strings.Contains(verdictBodyApprove(1), "first pass") {
-		t.Errorf("the first pass may say so: %q", verdictBodyApprove(1))
 	}
 }
 
@@ -522,7 +563,7 @@ func TestALaterPassApprovalSaysWhatItCovers(t *testing.T) {
 	body := verdictBodyApprove(2)
 	for _, want := range []string{
 		"commits added since the previous automated pass",
-		"may be unaddressed",
+		"may still be open",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("a later pass's approval must scope itself (%q missing):\n%s", want, body)
@@ -530,7 +571,7 @@ func TestALaterPassApprovalSaysWhatItCovers(t *testing.T) {
 	}
 	// A first pass has nothing earlier to qualify, and the caveat would be
 	// noise that trains readers to skip the body.
-	if strings.Contains(verdictBodyApprove(1), "may be unaddressed") {
+	if strings.Contains(verdictBodyApprove(1), "may still be open") {
 		t.Errorf("the first pass has no earlier findings to warn about: %q", verdictBodyApprove(1))
 	}
 }

@@ -5,7 +5,7 @@ A machine pass over a PR ahead of human review — and again when it changes.
 `firstpass` is a Go daemon for Windows that watches a Google Chat space for
 posted GitHub pull request links and, for each newly posted PR, runs a
 [Claude Code](https://claude.com/product/claude-code) review in an isolated
-git worktree and posts the findings as inline comments on the PR.
+git worktree and posts the findings as a comment on the PR.
 
 The name is about position, not count: each pass is the first automated look
 at the commits it reviews, ahead of a human. A re-posted PR with new commits
@@ -33,11 +33,23 @@ One sweep, on a ticker or on demand:
    The prompt is a general instruction rather than a slash command, and that
    is deliberate. A command's own procedure crowds out the reviewer's skills;
    a general instruction lets them be selected for the repository being
-   reviewed. Measured: in a C# repo, a general review prompt loads
-   `dotnet-techne-code-review` on its own and produces findings with a
-   severity taxonomy of blocking / important / suggestion — which maps onto
-   firstpass's own rule that mandatory points block an approval and nits do
-   not.
+   reviewed. Measured: in a C# fixture, a general review prompt loads
+   `dotnet-techne-code-review` on its own.
+
+   It does not always, though, and firstpass no longer depends on it. The
+   first live review under the general prompt loaded no skill at all — that
+   service repository carries an 859-line `CLAUDE.md`, and the model reviewed
+   directly from it rather than reaching for a generic checklist. The review
+   was good and simply had no severity labels. So the prompt asks for the
+   shape it needs: **one severity per finding — blocking, important or
+   suggestion**. That is also what makes the verdict rule checkable, since
+   firstpass never sees a finding.
+
+   Live, the reviewer posts its findings as **one comment** on the PR, each
+   finding naming its file and line — not one comment per line. A per-line
+   comment needs a path, a line and a diff position that still resolves; a
+   single comment carries each location in its text and cannot fail to
+   anchor.
 
    The duplication is not belt-and-braces for its own sake. The system prompt
    alone did not work: fourteen consecutive production reviews finished,
@@ -51,7 +63,7 @@ One sweep, on a ticker or on demand:
    under the old slash command, dry run was expressed by withholding a
    `--comment` flag that the command never actually read, so the only thing
    keeping a dry run quiet was that the reviewer happened not to post. Live,
-   the reviewer is told to post each finding as an inline comment — and
+   the reviewer is told to post its findings in one comment — and
    firstpass writes a report anyway in the two live cases it could not otherwise
    explain: a review that finished without a verdict line, and one that did
    not finish at all. A live report says plainly that its comments are
@@ -59,13 +71,23 @@ One sweep, on a ticker or on demand:
 7. Submit that verdict as a GitHub review, so a reviewed PR is never silent —
    a clean one used to produce nothing at all, indistinguishable from the tool
    never having run. Nothing needing change (no findings, or only minor nits)
-   is an **approval**, posted under your own GitHub identity. Anything
-   Critical or Important is a **comment** review, deliberately not
+   is an **approval**, posted under your own GitHub identity. Only a
+   **blocking** or **important** finding withholds one: nits, style and
+   nice-to-haves are posted alongside an approval rather than blocking it.
+   Anything blocking or important becomes a **comment** review, deliberately not
    request-changes: a comment leaves `reviewDecision` at `REVIEW_REQUIRED`, so
    the PR stays in the team's human review queue, whereas an approval would
-   take it out. Every verdict body says in its first sentence that it is
-   machine-written. A dry run submits nothing and its report says what the
-   verdict would have been.
+   take it out. A dry run submits nothing and its report says what the verdict
+   would have been.
+
+   The bodies are deliberately short — one sentence saying what it found, and
+   nothing else. No pass number, no link back to this repository, and no
+   "machine-written" disclaimer: every one of them is a comment on somebody
+   else's pull request, and boilerplate above the point is how a reader learns
+   to skip the whole thing. Note the trade that last one makes: submitted
+   under your own GitHub identity, nothing in the body now distinguishes these
+   from a review you wrote by hand. The exception is a later pass, which adds
+   one sentence saying it covered only the newest commits.
 
    **An approval covers the whole pull request.** Before the review runs,
    firstpass enumerates every piece of feedback already on the PR — unresolved
@@ -98,7 +120,7 @@ The dedupe rule is **once per commit, on a re-post** — not once per pull
 request. A PR posted to the space again is reviewed again, but only if it has
 new commits since the pass that already reviewed it.
 
-**A second pass posts a fresh set of inline comments.** It is a whole review,
+**A second pass posts a fresh comment.** It is a whole review,
 not an increment: the reviewer is told a previous pass ran and asked to
 concentrate on what has changed and not to restate that pass's findings, but
 nothing enforces it. Expect new comments on the pull request, and a new
@@ -465,7 +487,8 @@ Read this before running anything other than `doctor` or `scan -print-only`.
   filtering were checked against 200 messages of real chat history, and a
   dry-run `replay` produced a substantive report in 12m15s, which is why
   `review_timeout` defaults to 30m. Comments have since been posted live: on
-  a 7-file, +539/−12 pull request firstpass left three inline comments,
+  a 7-file, +539/−12 pull request firstpass left three inline comments (under
+  the earlier per-line posting, since replaced by one comment per review),
   including one that falsified a security claim in the PR's own description,
   one `IsSuccessStatusCode` trap where a 2xx with an undeserialisable body
   silently skips an audit-trail write, and one null dereference whose broad

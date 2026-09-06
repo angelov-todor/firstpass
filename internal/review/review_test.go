@@ -47,8 +47,16 @@ func TestPromptNamesThePRAndIncludesCommentWhenLive(t *testing.T) {
 	// that reviews .NET changes produces a report and posts nothing at all --
 	// which the old slash command did do, and is why the instruction had to
 	// become explicit when the command went away.
-	if !strings.Contains(got, "Post each finding as an inline comment") {
+	//
+	// One comment, not one per line, at the owner's request -- and the more
+	// robust of the two, since a per-line comment needs a path, a line and a
+	// diff position that still resolves, while a single comment carries each
+	// finding's location in its text and cannot fail to anchor.
+	if !strings.Contains(got, "ONE comment on the pull request") {
 		t.Errorf("Prompt() = %q; a live review must be told to post its findings", got)
+	}
+	if strings.Contains(got, "inline comment on the pull request, on the line") {
+		t.Errorf("Prompt() = %q; per-line comments were dropped deliberately", got)
 	}
 	if strings.Contains(got, "Do NOT post") {
 		t.Errorf("Prompt() = %q; a live review must not be told to stay quiet", got)
@@ -147,17 +155,27 @@ func TestRunWritesAReportInDryRun(t *testing.T) {
 	}
 }
 
-func TestRunWritesNoReportWhenLive(t *testing.T) {
+// TestEvenAnApprovingLiveReviewKeepsItsOutput replaces
+// TestRunWritesNoReportWhenLive, which asserted the opposite on the grounds
+// that "a live run's findings live on the PR".
+//
+// That held while the slash command posted the findings and an approve meant
+// nothing had been raised. Neither is true now. Posting is a prose
+// instruction, and the skills a general prompt selects do not all post -- the
+// .NET review skill produces a report and posts nothing. And under the current
+// rule a pull request whose every finding is a suggestion is an *approval*,
+// with those suggestions posted alongside it.
+//
+// Put together there is no live outcome with provably nothing to preserve. An
+// approve carrying three suggestions the reviewer reported rather than posted
+// would, under the old behaviour, have been recorded as "No findings needing a
+// change" with the suggestions discarded -- the tool looking like it found
+// nothing when it had.
+func TestEvenAnApprovingLiveReviewKeepsItsOutput(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		// An APPROVE verdict, because that is now the only live outcome with
-		// nothing left to preserve: nothing was raised, so there are no
-		// findings to lose. Every other live outcome keeps its output -- no
-		// verdict, a failure, and findings, the last because posting became an
-		// instruction in the prompt rather than something the slash command
-		// did, and the skills a general prompt selects do not all post.
 		{Match: "Review pull request", Result: runner.Result{
-			Stdout: []byte("nothing to report\n" + VerdictMarker + " approve\n"),
+			Stdout: []byte("suggestion: rename this for clarity\n" + VerdictMarker + " approve\n"),
 		}},
 	}}
 	rr := New(f, "claude", nil, false, dir)
@@ -166,15 +184,17 @@ func TestRunWritesNoReportWhenLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.ReportPath != "" {
-		t.Errorf("ReportPath = %q; a live run's findings live on the PR", res.ReportPath)
+	if res.ReportPath == "" {
+		t.Fatal("an approving live review must still keep its output: an approval can carry " +
+			"suggestions, and suggestions the reviewer reported rather than posted would " +
+			"otherwise be lost with the body saying nothing was found")
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
+	body, rerr := os.ReadFile(res.ReportPath)
+	if rerr != nil {
+		t.Fatal(rerr)
 	}
-	if len(entries) != 0 {
-		t.Errorf("no report files expected, found %d", len(entries))
+	if !strings.Contains(string(body), "rename this for clarity") {
+		t.Errorf("the kept output must carry the suggestion:\n%s", body)
 	}
 }
 

@@ -36,8 +36,9 @@ type Result struct {
 // to change something?".
 //
 // firstpass is deliberately ignorant of the findings themselves — the
-// reviewer posts them as inline comments and firstpass sees only the exit code
-// and stdout — so this one line is the whole channel between the two.
+// reviewer posts them in a comment on the pull request and firstpass sees only
+// the exit code and stdout — so this one line is the whole channel between the
+// two.
 // Deciding the verdict is the reviewer's job; submitting it is firstpass's.
 type Verdict string
 
@@ -47,10 +48,12 @@ const (
 	// submits nothing rather than guess, because the wrong guess is an
 	// approval on a colleague's pull request.
 	VerdictUnknown Verdict = "unknown"
-	// VerdictApprove means nothing needing change was raised: no findings, or
-	// only minor nits.
+	// VerdictApprove means nothing needing a change was raised: no findings at
+	// all, or only suggestion-level ones. Nits, style and nice-to-haves do not
+	// withhold an approval; they are posted alongside it.
 	VerdictApprove Verdict = "approve"
-	// VerdictFindings means something Critical or Important was raised.
+	// VerdictFindings means something blocking or important was raised. A
+	// suggestion alone is not enough: see VerdictApprove.
 	VerdictFindings Verdict = "findings"
 )
 
@@ -152,9 +155,11 @@ const promptVerdictAsk = "\n\nWhen the review is complete, print exactly one of 
 	"verbatim, as the very last line of your output:\n" +
 	VerdictMarker + " approve\n" +
 	VerdictMarker + " findings\n" +
-	"Print `findings` if the review raised anything Critical or Important, and `approve` if it " +
-	"raised nothing or only minor nits. This line is the only thing firstpass can see about what " +
-	"you found.\n" +
+	"Print `findings` ONLY if the review raised something **blocking** or **important**. Print " +
+	"`approve` if it raised nothing at all, or only **suggestion**-level points: nits, style and " +
+	"nice-to-haves do not withhold an approval, and a pull request whose every finding is a " +
+	"suggestion is an approval with those suggestions posted alongside it. This line is the only " +
+	"thing firstpass can see about what you found.\n" +
 	// ParseVerdict takes the *last* marked line, so this constraint is not
 	// politeness: a recap or a sentence quoting the marker after the real
 	// verdict is read as the verdict. "findings" followed by prose mentioning
@@ -163,6 +168,29 @@ const promptVerdictAsk = "\n\nWhen the review is complete, print exactly one of 
 	// exists to prevent. The system prompt has said this all along, and this
 	// commit is the evidence that the system prompt alone is not obeyed.
 	"Print nothing at all after that line, and no other line beginning with " + VerdictMarker
+
+// findingFormat asks for one severity label per finding, and it is the fix for
+// reviews that "still look the old way".
+//
+// Skill selection was supposed to supply the shape: a general prompt loads a
+// .NET review skill on its own, and that skill mandates a structure. Measured
+// in a small fixture, it does exactly that. Measured in a real service
+// repository, it does not -- the first live review under the general prompt
+// loaded no skill at all, because that repository carries an 859-line
+// CLAUDE.md and the model reviews directly from it rather than reaching for a
+// generic checklist. The review was good; it simply had no severity labels.
+//
+// So the shape is asked for here rather than inherited from whichever skill
+// happens to load. That also makes the verdict rule checkable: "only minor
+// things were found" is a judgement about severities, and firstpass cannot see
+// findings -- it can only see the verdict line the severities are supposed to
+// produce.
+//
+// The taxonomy is the one the .NET skill already uses, so a review that does
+// load it needs no translation.
+const findingFormat = " Label every finding with exactly one severity: **blocking**, " +
+	"**important**, or **suggestion**. `suggestion` is for nits, style and " +
+	"nice-to-haves -- things a senior engineer would mention but not hold a merge for."
 
 // The two posting clauses, and the only thing that differs between a dry run
 // and a live one.
@@ -192,8 +220,16 @@ const (
 	// Live has to be told to post, which the slash command used to handle. It
 	// cannot be assumed: the skill that reviews .NET changes produces a report
 	// and posts nothing at all.
-	livePostingClause = " Post each finding as an inline comment on the pull request, on the " +
-		"line it concerns, using gh."
+	//
+	// One comment on the pull request, not one per line. That is the owner's
+	// call, and it is also the more robust of the two: a per-line comment needs
+	// a path, a line number and a diff position that still resolves, and a
+	// review whose anchors have drifted posts nothing or posts in the wrong
+	// place. A single comment carries every finding with its own file and line
+	// written in the text, which cannot fail to anchor.
+	livePostingClause = " Post your findings as ONE comment on the pull request with `gh pr " +
+		"comment`, each finding naming its file and line. Do not post per-line inline comments " +
+		"and do not submit a GitHub review: firstpass submits the review itself."
 )
 
 // Prompt is what claude is asked to do: a general instruction naming the pull
@@ -222,7 +258,9 @@ const (
 // promptVerdictAsk for why the verdict requirement is repeated here.
 func (rr *Runner) Prompt(ref prref.PRRef) string {
 	p := "Review pull request " + ref.URL() + " for correctness, performance, security and " +
-		"maintainability. Read the change and whatever context you need to judge it."
+		"maintainability. Read the change and whatever context you need to judge it. Use " +
+		"whichever installed review skills apply to this repository." +
+		findingFormat
 	if rr.dryRun {
 		p += dryRunPostingClause
 	} else {
@@ -267,9 +305,10 @@ const verdictInstruction = "You are running as firstpass: an automated review pa
 	"last line of your output:\n" +
 	VerdictMarker + " approve\n" +
 	VerdictMarker + " findings\n\n" +
-	"Print `findings` if the review raised anything Critical or Important. Print `approve` if " +
-	"the review raised nothing at all, or only minor nits. Print nothing after that line, and " +
-	"no other line starting with " + VerdictMarker + "\n\n" +
+	"Print `findings` only if the review raised something blocking or important. Print `approve` " +
+	"if it raised nothing at all, or only suggestion-level points -- nits, style and " +
+	"nice-to-haves do not withhold an approval. Print nothing after that line, and no other " +
+	"line starting with " + VerdictMarker + "\n\n" +
 	"firstpass reads that line to decide whether to submit an approving review on the pull " +
 	"request or to leave it in the team's human review queue. It is the only thing firstpass " +
 	"can see about what you found: if the line is missing or reworded, firstpass submits no " +
@@ -388,28 +427,25 @@ func secondPassNote(pp PreviousPass) string {
 		return "A previous automated pass " + what + " Nothing has changed since, so review it " +
 			"in full: this pass was asked for deliberately, and a review that held its findings " +
 			"back because an earlier one might have had them would say nothing at all.\n\n" +
-			"Before you post a finding, check whether that comment is already on the pull " +
-			"request, and do not post it again if it is: a second copy of the same comment on " +
-			"the same line spends the author's time twice on one point. Everything else, raise " +
-			"as you normally would.\n\n" + verdictScopeNote
+			"Before you raise a finding, check whether it is already in that pass's comment " +
+			"on the pull request, and leave it out if it is: repeating a point spends the " +
+			"author's time twice on it. Everything else, raise as you normally would.\n\n" +
+			verdictScopeNote
 	}
 
 	head := "A previous automated pass already reviewed this pull request at commit " + short +
-		" and posted its findings as inline comments on it.\n\n" +
+		" and posted its findings in a comment on it.\n\n" +
 		"Concentrate your COMMENTS on what has changed since " + short + ". Do not restate " +
-		"findings from that pass: they are already on the pull request, and repeating one puts a " +
-		"second copy of the same comment on the same line, which spends the author's time twice " +
-		"on one point.\n\n" + verdictScopeNote
+		"findings from that pass: they are already in that comment, and repeating one spends the " +
+		"author's time twice on the same point.\n\n" + verdictScopeNote
 	if pp.Incomplete {
 		head = "A previous automated pass began reviewing this pull request at commit " + short +
-			" and did not finish. Some of its findings may already be posted as inline comments " +
-			"on the pull request and some may not: it was posting them one at a time when it " +
-			"stopped, and firstpass cannot tell how far it got.\n\n" +
-			"Concentrate your COMMENTS on what has changed since " + short + ". Before you post " +
-			"a finding, check whether that comment is already on the pull request, and do not " +
-			"post it again if it is: a second copy of the same comment on the same line spends " +
-			"the author's time twice on one point. Where a finding is not already there, raise " +
-			"it -- the earlier pass may never have got to it.\n\n" + verdictScopeNote
+			" and did not finish. It may or may not have got as far as posting its findings, " +
+			"and firstpass cannot tell which.\n\n" +
+			"Concentrate your COMMENTS on what has changed since " + short + ". Look for that " +
+			"pass's comment on the pull request: if it is there, do not restate what is in it; " +
+			"if it is not, that pass posted nothing and everything it would have found is still " +
+			"worth raising.\n\n" + verdictScopeNote
 	}
 
 	return head + "\n\n" +
@@ -541,14 +577,24 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 		// reviewer had printed is the only evidence of how far it actually
 		// got.
 		//
-		// VerdictFindings is included for a reason that only appeared once the
-		// slash command went away. Posting is now a prose instruction, and the
-		// skills a general prompt selects do not necessarily post -- the .NET
-		// review skill produces a report and posts nothing at all. So a live
-		// review can finish, print `findings`, and leave nothing on the pull
-		// request; discarding its output would lose the findings entirely and
-		// silently. Keeping it costs one file per review with findings.
-		if runErr != nil || out.Verdict == VerdictUnknown || out.Verdict == VerdictFindings {
+		// Every live outcome keeps its output, and the condition is gone
+		// entirely rather than listing which ones.
+		//
+		// Two changes brought it here. Posting became a prose instruction when
+		// the slash command went away, and the skills a general prompt selects
+		// do not necessarily post -- the .NET review skill produces a report
+		// and posts nothing at all. And an `approve` stopped meaning "nothing
+		// was found": under the current rule a pull request whose every finding
+		// is a suggestion is an approval, with those suggestions posted
+		// alongside it.
+		//
+		// Put together, there is no live outcome with provably nothing to
+		// preserve. An approve that carried three suggestions the reviewer
+		// reported instead of posting would, under the old condition, have
+		// been recorded as "No findings needing a change" with the suggestions
+		// discarded -- the tool looking like it found nothing when it had.
+		// Keeping the output costs one small file per review.
+		{
 			if path, werr := rr.writeReport(ref, previous, res.Stdout, res.Stderr, out.Verdict, runErr); werr == nil {
 				out.ReportPath = path
 			}
