@@ -191,8 +191,14 @@ func (rr *Runner) Prompt(ref prref.PRRef) string {
 // It has to stand on its own, with no command adjacent to lean on, and it
 // states the severity rule because firstpass cannot apply it: firstpass never
 // sees a finding, only this line.
-const verdictInstruction = "You are running as firstpass: an automated first pass over a pull " +
-	"request, before any human has looked at it.\n\n" +
+// "an automated review pass", not "an automated first pass ... before any
+// human has looked at it". The old wording was told to the reviewer on every
+// pass, including the fifth, where both halves are false: it is not the first
+// pass, and a human may well have reviewed the pull request by then. What the
+// reviewer needs to know about history it is told precisely, by
+// secondPassNote, which only appears when there actually was a previous pass.
+const verdictInstruction = "You are running as firstpass: an automated review pass over a pull " +
+	"request, ahead of human review.\n\n" +
 	"When your review is complete, print exactly one of these two lines, verbatim, as the very " +
 	"last line of your output:\n" +
 	VerdictMarker + " approve\n" +

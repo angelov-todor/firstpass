@@ -86,25 +86,60 @@ const ExitUnknown = -1
 // these reviews on their pull request can see what produced it.
 const firstpassURL = "https://github.com/angelov-todor/firstpass"
 
-// The two verdict bodies. They open by saying they are machine-written
-// because they are submitted under the operator's own GitHub identity, and a
-// colleague reading one has no other way to tell.
-const (
-	verdictBodyApprove = "Automated first pass by firstpass — no findings. " +
+// The verdict bodies. They open by saying they are machine-written because
+// they are submitted under the operator's own GitHub identity, and a colleague
+// reading one has no other way to tell.
+//
+// They are built per pass rather than fixed, because "first pass" stopped
+// being true the moment re-reviews shipped. Production has already produced
+// passes 2, 3 and 5, and only the fact that no verdict was ever submitted
+// kept "Automated first pass" off a colleague's pull request for the fifth
+// review of it.
+//
+// The scope sentence on a later pass is the part that matters most. A second
+// pass is asked to concentrate on the commits added since the last one and
+// explicitly not to restate earlier findings, so an approval on pass 2 means
+// "the new commits raised nothing", NOT "this pull request is fine". Those two
+// readings differ exactly when it counts: when an earlier pass raised findings
+// the author has not addressed. Saying which one is meant is the difference
+// between an honest approval and one that reads as a blessing of the whole
+// change.
+const verdictScopeLater = "This pass reviewed the commits added since the previous automated " +
+	"pass, and was asked not to restate findings from it — so any findings from earlier " +
+	"passes still stand on their own and may be unaddressed."
+
+func verdictBodyApprove(pass int) string {
+	if pass > 1 {
+		return fmt.Sprintf("Automated pass %d by firstpass — no findings. "+
+			"This is machine-written, not a human review.\n\n"+
+			"firstpass ran a Claude Code review and raised nothing needing a change. %s\n\n%s",
+			pass, verdictScopeLater, firstpassURL)
+	}
+	return "Automated first pass by firstpass — no findings. " +
 		"This is machine-written, not a human review.\n\n" +
 		"firstpass ran a Claude Code review over this pull request and raised nothing " +
 		"needing a change.\n\n" + firstpassURL
+}
 
-	// "posted as inline comments on this pull request", not "on this review":
-	// /code-review posts each inline comment as its own review event, so the
-	// comments do not hang off this review at all. Saying they did would be
-	// false to any colleague who went looking for them here.
-	verdictBodyFindings = "Automated first pass by firstpass — findings posted inline. " +
+// "posted as inline comments on this pull request", not "on this review":
+// /code-review posts each inline comment as its own review event, so the
+// comments do not hang off this review at all. Saying they did would be false
+// to any colleague who went looking for them here.
+func verdictBodyFindings(pass int) string {
+	if pass > 1 {
+		return fmt.Sprintf("Automated pass %d by firstpass — findings posted inline. "+
+			"This is machine-written and is not a substitute for human review.\n\n"+
+			"The findings are posted as inline comments on this pull request. This is deliberately "+
+			"a comment rather than a request for changes, so the pull request stays in the team's "+
+			"human review queue. %s\n\n%s",
+			pass, verdictScopeLater, firstpassURL)
+	}
+	return "Automated first pass by firstpass — findings posted inline. " +
 		"This is machine-written and is not a substitute for human review.\n\n" +
 		"The findings are posted as inline comments on this pull request. This is deliberately " +
 		"a comment rather than a request for changes, so the pull request stays in the team's " +
 		"human review queue.\n\n" + firstpassURL
-)
+}
 
 // noVerdictDetail is recorded when a review finished but printed no verdict
 // line firstpass recognises. Nothing is submitted and nothing is guessed: an
@@ -1204,9 +1239,9 @@ func (p *Pipeline) submitVerdict(ctx context.Context, rec *store.Review, ref prr
 	var submitted store.Verdict
 	switch v {
 	case review.VerdictApprove:
-		event, body, submitted = ghpr.ReviewApprove, verdictBodyApprove, store.VerdictApproved
+		event, body, submitted = ghpr.ReviewApprove, verdictBodyApprove(rec.Pass), store.VerdictApproved
 	case review.VerdictFindings:
-		event, body, submitted = ghpr.ReviewComment, verdictBodyFindings, store.VerdictFindings
+		event, body, submitted = ghpr.ReviewComment, verdictBodyFindings(rec.Pass), store.VerdictFindings
 	default:
 		p.Log.Warn("no verdict", "key", ref.Key(), "verdict", string(v))
 		// Recorded as unknown in both modes, unlike the dry-run branch below
