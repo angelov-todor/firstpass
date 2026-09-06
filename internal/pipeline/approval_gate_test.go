@@ -208,3 +208,69 @@ func TestADryRunPostsNothingWhenAnApprovalIsWithheld(t *testing.T) {
 		t.Errorf("Detail must say why: %q", rec.Detail)
 	}
 }
+
+// TestABodyDoesNotClaimFindingsWerePostedWhenTheyWereNot is the fix for a
+// claim that became false when the slash command went away.
+//
+// The command posted the findings itself. Now posting is an instruction in the
+// prompt, and the skills a general prompt selects do not all post: the .NET
+// review skill produces a report and posts nothing at all. So a live review
+// can finish, print `findings`, post nothing, and firstpass would submit a
+// review telling a colleague "the findings are posted as inline comments on
+// this pull request" — sending them to hunt for comments that do not exist,
+// and leaving them to conclude the tool is broken or, worse, that the review
+// found nothing.
+//
+// The check is a count, not a search: firstpass never sees a finding, so it
+// cannot look for one. It asks how many items the operator had authored on the
+// pull request before the review and again afterwards.
+func TestABodyDoesNotClaimFindingsWerePostedWhenTheyWereNot(t *testing.T) {
+	// Both feedback answers are the same, so nothing arrived under the
+	// operator's name while the review ran.
+	h, f := gateHarness(t, review.VerdictFindings,
+		runner.Result{Stdout: []byte(emptyFeedbackJSON)})
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join(ghReviewCalls(f)[0].Args, " ")
+
+	if strings.Contains(body, "The findings are posted as inline comments on this pull request.") {
+		t.Errorf("the body asserts the findings are posted when nothing was:\n%s", body)
+	}
+	if !strings.Contains(body, "could not confirm that the findings were posted") {
+		t.Errorf("the body must say plainly that posting was not confirmed:\n%s", body)
+	}
+	// And it must tell the reader what to do instead, or the hedge is just
+	// doubt with no way out of it.
+	if !strings.Contains(body, "report on the operator's machine") {
+		t.Errorf("the body must say where the findings are instead:\n%s", body)
+	}
+	// The verdict itself is unaffected: findings is still findings.
+	if rec := reviewRecord(t, h); rec.Verdict != store.VerdictFindings {
+		t.Errorf("Verdict = %q, want findings", rec.Verdict)
+	}
+}
+
+// The converse, so the hedge cannot become unconditional: when a comment does
+// arrive under the operator's name during the review, the body says so plainly.
+func TestABodySaysTheFindingsArePostedWhenTheyAre(t *testing.T) {
+	h := newHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-balances", 12))})
+	h.seedWatermark(t)
+	f := ghFake(runner.Result{})
+	h.p.PRs = ghpr.New(f, "gh")
+	h.rev.result = review.Result{Verdict: review.VerdictFindings}
+	h.cfg.DryRun = false
+	h.apply()
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join(ghReviewCalls(f)[0].Args, " ")
+	if !strings.Contains(body, "The findings are posted as inline comments on this pull request.") {
+		t.Errorf("a confirmed post must be stated plainly:\n%s", body)
+	}
+	if strings.Contains(body, "could not confirm") {
+		t.Errorf("a confirmed post must not be hedged:\n%s", body)
+	}
+}

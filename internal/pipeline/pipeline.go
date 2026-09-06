@@ -136,20 +136,77 @@ func verdictBodyApprove(pass int) string {
 // /code-review posts each inline comment as its own review event, so the
 // comments do not hang off this review at all. Saying they did would be false
 // to any colleague who went looking for them here.
-func verdictBodyFindings(pass int) string {
-	if pass > 1 {
-		return fmt.Sprintf("Automated pass %d by firstpass — findings posted inline. "+
-			"This is machine-written and is not a substitute for human review.\n\n"+
-			"The findings are posted as inline comments on this pull request. This is deliberately "+
-			"a comment rather than a request for changes, so the pull request stays in the team's "+
-			"human review queue. %s\n\n%s",
-			pass, verdictScopeLater, firstpassURL)
+// verdictBodyFindings is submitted when the reviewer raised something.
+//
+// posted says whether firstpass confirmed the findings actually reached the
+// pull request, and the body says only what is true of the run it describes.
+// It used to assert "the findings are posted as inline comments on this pull
+// request" unconditionally, which was safe while the slash command did the
+// posting and became a claim that could be false the moment posting turned
+// into an instruction in the prompt: the skills a general prompt selects do
+// not all post, and the .NET review skill reports and posts nothing.
+//
+// Where the hedge lands matters. A colleague reading this needs to know
+// whether to go looking for inline comments; sending them to hunt for comments
+// that were never posted wastes their time and makes the tool look broken,
+// which is a worse outcome than admitting firstpass could not confirm it.
+func verdictBodyFindings(pass int, posted bool) string {
+	where := "The findings are posted as inline comments on this pull request."
+	if !posted {
+		where = "firstpass could not confirm that the findings were posted as inline comments " +
+			"here. If you cannot see them on the diff, they were reported to firstpass instead " +
+			"of posted, and they are in its report on the operator's machine — ask them for it " +
+			"rather than assuming the review found nothing."
 	}
-	return "Automated first pass by firstpass — findings posted inline. " +
-		"This is machine-written and is not a substitute for human review.\n\n" +
-		"The findings are posted as inline comments on this pull request. This is deliberately " +
-		"a comment rather than a request for changes, so the pull request stays in the team's " +
-		"human review queue.\n\n" + firstpassURL
+	which := "Automated first pass"
+	scope := ""
+	if pass > 1 {
+		which = fmt.Sprintf("Automated pass %d", pass)
+		scope = " " + verdictScopeLater
+	}
+	return fmt.Sprintf("%s by firstpass — findings raised. "+
+		"This is machine-written and is not a substitute for human review.\n\n"+
+		"%s This is deliberately a comment rather than a request for changes, so the pull "+
+		"request stays in the team's human review queue.%s\n\n%s",
+		which, where, scope, firstpassURL)
+}
+
+// ownFeedbackCount counts the items on a pull request authored by the
+// operator. It is the baseline for "did this review post anything".
+func ownFeedbackCount(f ghpr.Feedback, login string) int {
+	n := 0
+	for _, it := range f.Items {
+		if strings.EqualFold(it.Author, login) {
+			n++
+		}
+	}
+	return n
+}
+
+// findingsReachedThePR reports whether the operator's item count on the pull
+// request went up during the review.
+//
+// A count rather than a search for particular text: firstpass never sees a
+// finding, so it cannot look for one. What it can establish is whether
+// anything at all arrived under the operator's name while the review ran,
+// which is exactly the difference between a reviewer that posted and one that
+// reported.
+//
+// False on any failure, and that direction is deliberate. Unconfirmed is not
+// the same as confirmed-absent, but the only thing this value controls is
+// whether the verdict body asserts the findings are on the pull request. An
+// assertion firstpass cannot support is worse than a hedge, so the hedge is
+// what an unverifiable answer produces.
+func (p *Pipeline) findingsReachedThePR(ctx context.Context, ref prref.PRRef, before int) bool {
+	fctx, cancel := context.WithTimeout(ctx, p.Cfg.GHTimeout.D())
+	defer cancel()
+	after, err := p.PRs.FetchFeedback(fctx, ref)
+	if err != nil {
+		p.Log.Warn("could not confirm the review's findings reached the pull request; "+
+			"the verdict body will not claim they did", "key", ref.Key(), "err", err)
+		return false
+	}
+	return ownFeedbackCount(after, p.Cfg.GithubLogin) > before
 }
 
 // toPriorFeedback converts what GitHub reported into what the reviewer is
@@ -1201,6 +1258,22 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 	rec.ExitCode = res.ExitCode
 	rec.ReportPath = res.ReportPath
 
+	// Did the findings actually reach the pull request?
+	//
+	// Asked rather than assumed, because the answer changed when the slash
+	// command went away. Posting is an instruction in the prompt now, and the
+	// skills a general prompt selects do not all post -- the .NET review skill
+	// reports and posts nothing. A review that finishes, prints `findings` and
+	// posts nothing used to be impossible and is now merely quiet.
+	//
+	// Counted against the baseline firstpass already has: it fetched the
+	// existing feedback before the review, so it knows how many items the
+	// operator had authored beforehand. Live only -- a dry run posts nothing by
+	// design and there is nothing to verify.
+	if !p.Cfg.DryRun && rerr == nil && res.Verdict == review.VerdictFindings {
+		gate.findingsPosted = p.findingsReachedThePR(ctx, ref, ownFeedbackCount(fb, p.Cfg.GithubLogin))
+	}
+
 	if rerr != nil {
 		rec.Outcome = store.OutcomeNeedsAttention
 		reason := "review did not finish: " + rerr.Error()
@@ -1323,6 +1396,21 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 type verdictGate struct {
 	feedbackUsable   bool
 	changesRequested bool
+	// findingsPosted records whether firstpass confirmed that this review's
+	// findings actually reached the pull request.
+	//
+	// Posting stopped being something firstpass could take for granted when the
+	// slash command went away. The command posted; now it is an instruction in
+	// the prompt, and the skills a general prompt selects do not all post --
+	// the .NET review skill produces a report and posts nothing at all. So
+	// "the findings are posted as inline comments on this pull request", which
+	// the verdict body stated as fact, became a claim that can be false on a
+	// colleague's pull request.
+	//
+	// Confirmed by counting, not by trusting: firstpass already fetches the
+	// existing feedback before the review, so it knows how many items were
+	// authored by the operator beforehand and can look again afterwards.
+	findingsPosted bool
 }
 
 // withheldReason returns why an approve must not be submitted, or "" when it
@@ -1363,7 +1451,7 @@ func (p *Pipeline) submitVerdict(ctx context.Context, rec *store.Review, ref prr
 		}
 		event, body, submitted = ghpr.ReviewApprove, verdictBodyApprove(rec.Pass), store.VerdictApproved
 	case review.VerdictFindings:
-		event, body, submitted = ghpr.ReviewComment, verdictBodyFindings(rec.Pass), store.VerdictFindings
+		event, body, submitted = ghpr.ReviewComment, verdictBodyFindings(rec.Pass, gate.findingsPosted), store.VerdictFindings
 	default:
 		p.Log.Warn("no verdict", "key", ref.Key(), "verdict", string(v))
 		// Recorded as unknown in both modes, unlike the dry-run branch below

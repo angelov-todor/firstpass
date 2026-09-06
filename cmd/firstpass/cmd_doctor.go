@@ -96,7 +96,9 @@ func cmdDoctor(args []string) error {
 		// pointed at a missing directory, finds nothing, and says nothing. The
 		// operator would have no reason to suspect the feature was off.
 		if cfg.DocsRoot != "" {
-			add("docs root present", exists(cfg.DocsRoot), cfg.DocsRoot)
+			// isDir, not exists: a docs_root pointing at a plain file passes an
+			// existence check and then every path built under it is missing.
+			add("docs root present", isDir(cfg.DocsRoot), cfg.DocsRoot)
 		}
 
 		r := runner.OS{}
@@ -190,6 +192,24 @@ func exists(path string) error {
 	}
 	if _, err := os.Stat(path); err != nil {
 		return err
+	}
+	return nil
+}
+
+// isDir is exists() plus the type check. A docs_root pointing at a plain file
+// passes an existence check and then every path built under it is missing --
+// which yields reviews indistinguishable from reviews with nothing to say
+// about compliance.
+func isDir(path string) error {
+	if path == "" {
+		return errors.New("not configured")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is a file, not a directory", path)
 	}
 	return nil
 }

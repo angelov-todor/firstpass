@@ -63,12 +63,7 @@ func TestDryRunAndLivePromptsDifferOnlyInWhetherTheyPost(t *testing.T) {
 	dry := New(&runner.Fake{}, "claude", nil, true, t.TempDir()).Prompt(ref)
 	live := New(&runner.Fake{}, "claude", nil, false, t.TempDir()).Prompt(ref)
 
-	const dryClause = " Do NOT post anything to GitHub: no comments, no review, nothing. " +
-		"Report your findings in your output instead."
-	const liveClause = " Post each finding as an inline comment on the pull request, on the " +
-		"line it concerns, using gh."
-
-	if strings.Replace(dry, dryClause, liveClause, 1) != live {
+	if strings.Replace(dry, dryRunPostingClause, livePostingClause, 1) != live {
 		t.Errorf("the prompts differ by more than the posting instruction:\ndry:  %q\nlive: %q",
 			dry, live)
 	}
@@ -155,12 +150,14 @@ func TestRunWritesAReportInDryRun(t *testing.T) {
 func TestRunWritesNoReportWhenLive(t *testing.T) {
 	dir := t.TempDir()
 	f := &runner.Fake{Replies: []runner.Reply{
-		// A verdict line, because a live review that produced one has nothing
-		// left to explain: its findings are on the pull request and its
-		// verdict is in the record. The no-verdict case is the exception and
-		// is covered by the test below.
+		// An APPROVE verdict, because that is now the only live outcome with
+		// nothing left to preserve: nothing was raised, so there are no
+		// findings to lose. Every other live outcome keeps its output -- no
+		// verdict, a failure, and findings, the last because posting became an
+		// instruction in the prompt rather than something the slash command
+		// did, and the skills a general prompt selects do not all post.
 		{Match: "Review pull request", Result: runner.Result{
-			Stdout: []byte("posted\n" + VerdictMarker + " findings\n"),
+			Stdout: []byte("nothing to report\n" + VerdictMarker + " approve\n"),
 		}},
 	}}
 	rr := New(f, "claude", nil, false, dir)
@@ -216,6 +213,41 @@ func TestALiveReviewWithNoVerdictKeepsItsOutput(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "a full review, ending in prose") {
 		t.Errorf("the kept output must be what the reviewer actually printed:\n%s", body)
+	}
+}
+
+// A live review that raised findings keeps its output, because it can no
+// longer be assumed the findings reached the pull request.
+//
+// Posting used to be the slash command's job. It is now an instruction in the
+// prompt, and the skills a general prompt selects do not all post -- the .NET
+// review skill produces a report and posts nothing at all. Discarding the
+// output of a review that found something would then lose the findings
+// entirely and silently, which is the worst outcome available: the pull
+// request looks reviewed and nothing was said.
+func TestALiveFindingsReviewKeepsItsOutput(t *testing.T) {
+	dir := t.TempDir()
+	f := &runner.Fake{Replies: []runner.Reply{
+		{Match: "Review pull request", Result: runner.Result{
+			Stdout: []byte("the allocation on line 9 is unbounded\n" + VerdictMarker + " findings\n"),
+		}},
+	}}
+	rr := New(f, "claude", nil, false, dir)
+
+	res, err := rr.Run(t.Context(), "work", ref, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ReportPath == "" {
+		t.Fatal("a live review with findings must keep its output: nothing else proves what " +
+			"it found if the reviewer reported instead of posting")
+	}
+	body, rerr := os.ReadFile(res.ReportPath)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !strings.Contains(string(body), "unbounded") {
+		t.Errorf("the kept output must be what the reviewer printed:\n%s", body)
 	}
 }
 

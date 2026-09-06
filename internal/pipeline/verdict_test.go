@@ -49,9 +49,26 @@ func ghFake(reviewResult runner.Result) *runner.Fake {
 	return &runner.Fake{Replies: []runner.Reply{
 		{Match: "pr view", Result: runner.Result{Stdout: []byte(prJSON)}},
 		{Match: "pr review", Result: reviewResult},
-		{Match: "graphql", Result: runner.Result{Stdout: []byte(emptyFeedbackJSON)}},
+		// Two graphql answers, because firstpass asks twice: once before the
+		// review for the prior-feedback index, and once after to establish
+		// whether the review actually posted anything. The second reply carries
+		// one comment authored by the operator, which is what a review that
+		// posted its findings looks like from outside.
+		{Match: "graphql", Result: runner.Result{Stdout: []byte(emptyFeedbackJSON)}, Times: 1},
+		{Match: "graphql", Result: runner.Result{Stdout: []byte(ownCommentFeedbackJSON)}},
 	}}
 }
+
+// ownCommentFeedbackJSON is the same pull request after the review has posted
+// one inline comment under the operator's login.
+const ownCommentFeedbackJSON = `{"data":{"repository":{"pullRequest":{` +
+	`"reviewDecision":"REVIEW_REQUIRED",` +
+	`"reviewThreads":{"totalCount":1,"nodes":[` +
+	`{"isResolved":false,"isOutdated":false,"path":"src/A.cs","line":9,` +
+	`"comments":{"nodes":[{"author":{"login":"angelov-todor","__typename":"User"},` +
+	`"body":"Null check missing.","url":"https://example.invalid/t1"}]}}]},` +
+	`"reviews":{"totalCount":0,"nodes":[]},` +
+	`"comments":{"totalCount":0,"nodes":[]}}}}}`
 
 // verdictHarness is one PR posted to the space, reviewed with the given
 // verdict, with gh behind a runner.Fake.
@@ -135,7 +152,7 @@ func TestLiveFindingsVerdictSubmitsACommentReview(t *testing.T) {
 		t.Fatalf("want exactly one gh pr review call, got %+v", calls)
 	}
 	want := []string{"pr", "review", "12", "--repo", "example-org/aex-balances",
-		"--comment", "--body", verdictBodyFindings(1)}
+		"--comment", "--body", verdictBodyFindings(1, true)}
 	if !slices.Equal(calls[0].Args, want) {
 		t.Errorf("Args = %q,\nwant %q", calls[0].Args, want)
 	}
@@ -164,8 +181,8 @@ func TestVerdictBodiesSayTheyAreMachineWritten(t *testing.T) {
 	}{
 		{"approve", verdictBodyApprove(1),
 			"Automated first pass by firstpass — no findings. This is machine-written, not a human review."},
-		{"findings", verdictBodyFindings(1),
-			"Automated first pass by firstpass — findings posted inline. This is machine-written and is not a substitute for human review."},
+		{"findings", verdictBodyFindings(1, true),
+			"Automated first pass by firstpass — findings raised. This is machine-written and is not a substitute for human review."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.HasPrefix(tc.body, tc.first) {
@@ -182,11 +199,11 @@ func TestVerdictBodiesSayTheyAreMachineWritten(t *testing.T) {
 // findings do not hang off the verdict review. Saying they did would send a
 // colleague looking for comments that are not there.
 func TestTheFindingsBodyDoesNotClaimTheCommentsAreOnThisReview(t *testing.T) {
-	if strings.Contains(verdictBodyFindings(1), "on this review") {
-		t.Errorf("the findings are not comments on this review: %q", verdictBodyFindings(1))
+	if strings.Contains(verdictBodyFindings(1, true), "on this review") {
+		t.Errorf("the findings are not comments on this review: %q", verdictBodyFindings(1, true))
 	}
-	if !strings.Contains(verdictBodyFindings(1), "inline comments on this pull request") {
-		t.Errorf("the body must say where the findings actually are: %q", verdictBodyFindings(1))
+	if !strings.Contains(verdictBodyFindings(1, true), "inline comments on this pull request") {
+		t.Errorf("the body must say where the findings actually are: %q", verdictBodyFindings(1, true))
 	}
 }
 
@@ -476,7 +493,7 @@ func TestPrintOnlySubmitsNoVerdict(t *testing.T) {
 // submitted, which was a separate bug; fixing that one armed this one.
 func TestALaterPassDoesNotCallItselfTheFirst(t *testing.T) {
 	for _, pass := range []int{2, 3, 5} {
-		for _, body := range []string{verdictBodyApprove(pass), verdictBodyFindings(pass)} {
+		for _, body := range []string{verdictBodyApprove(pass), verdictBodyFindings(pass, true)} {
 			if strings.Contains(body, "first pass") {
 				t.Errorf("pass %d body still calls itself the first pass:\n%s", pass, body)
 			}

@@ -279,6 +279,20 @@ func (c Config) Validate() error {
 		return errors.New("pending_max_age must be positive: zero makes every parked PR expire " +
 			"terminally on its next sweep, so nothing deferred is ever reviewed")
 	}
+	// Trimmed here so every consumer agrees on what "unset" means. docsNote
+	// trims before deciding whether it has a root; doctor was checking the
+	// untrimmed value, so `docs_root: "  "` produced a doctor FAIL for a
+	// feature the reviewer treated as switched off.
+	c.DocsRoot = strings.TrimSpace(c.DocsRoot)
+	if c.DocsRoot != "" && !filepath.IsAbs(c.DocsRoot) {
+		// The same trap state_dir has: a relative path is resolved against the
+		// process's working directory when doctor checks it, and against the
+		// throwaway worktree when the review runs. So it passes every check the
+		// operator can see and points at nothing where it matters -- which
+		// yields a review with no compliance dimension that reads exactly like
+		// a review with nothing to say about compliance.
+		return fmt.Errorf("docs_root must be an absolute path, got %q", c.DocsRoot)
+	}
 	if c.StateDir == "" {
 		return errors.New("state_dir is required")
 	}
