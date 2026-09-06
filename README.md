@@ -80,12 +80,14 @@ One sweep, on a ticker or on demand:
    take it out. A dry run submits nothing and its report says what the verdict
    would have been.
 
-   The bodies are deliberately short: one sentence saying a machine wrote
-   this, one saying what it found. No pass number, no link back to this
-   repository, no second disclaimer — every one of them is a comment on
-   somebody else's pull request, and boilerplate above the point is how a
-   reader learns to skip the whole thing. The exception is a later pass, which
-   adds one sentence saying it covered only the newest commits.
+   The bodies are deliberately short — one sentence saying what it found, and
+   nothing else. No pass number, no link back to this repository, and no
+   "machine-written" disclaimer: every one of them is a comment on somebody
+   else's pull request, and boilerplate above the point is how a reader learns
+   to skip the whole thing. Note the trade that last one makes: submitted
+   under your own GitHub identity, nothing in the body now distinguishes these
+   from a review you wrote by hand. The exception is a later pass, which adds
+   one sentence saying it covered only the newest commits.
 
    **An approval covers the whole pull request.** Before the review runs,
    firstpass enumerates every piece of feedback already on the PR — unresolved

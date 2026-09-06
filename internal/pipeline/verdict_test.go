@@ -171,20 +171,36 @@ func TestLiveFindingsVerdictSubmitsACommentReview(t *testing.T) {
 	}
 }
 
-// The operator's colleagues see these under the operator's own GitHub account,
-// so the body has to say what wrote it in its first sentence.
-func TestVerdictBodiesSayTheyAreMachineWritten(t *testing.T) {
+// TestVerdictBodiesCarryNoBoilerplate is what became of a test that required
+// every body to announce it was machine-written.
+//
+// That sentence, the pass number, the link back to this repository and a
+// second disclaimer were all removed at the owner's instruction: the team
+// knows these reviews are automated, and every one of these bodies is a
+// comment on somebody else's pull request, where boilerplate above the point
+// teaches a reader to skip the whole thing.
+//
+// So the assertion inverts. The body must get to the point and carry none of
+// it. Worth being explicit that this is a deliberate trade rather than an
+// oversight: submitted under the operator's own GitHub identity, nothing in
+// these bodies now distinguishes them from a review that person wrote by hand.
+func TestVerdictBodiesCarryNoBoilerplate(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		body  string
 		first string
 	}{
-		{"approve", verdictBodyApprove(1), machineWritten},
-		{"findings", verdictBodyFindings(1, true), machineWritten},
+		{"approve", verdictBodyApprove(1), "No findings needing a change."},
+		{"findings", verdictBodyFindings(1, true), "Findings are posted in a comment"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.HasPrefix(tc.body, tc.first) {
 				t.Errorf("the body must open with %q, got %q", tc.first, tc.body)
+			}
+			for _, unwanted := range []string{"machine-written", "firstpass —", "Automated review"} {
+				if strings.Contains(tc.body, unwanted) {
+					t.Errorf("the body must not carry %q: %q", unwanted, tc.body)
+				}
 			}
 			// The link back to this repository used to be here and was
 			// removed at the owner's request, along with the pass number and a
@@ -526,8 +542,8 @@ func TestNoBodyCallsItselfAPass(t *testing.T) {
 			if strings.Contains(body, fmt.Sprintf("pass %d", pass)) {
 				t.Errorf("pass %d body numbers itself; the owner asked for that gone:\n%s", pass, body)
 			}
-			if !strings.Contains(body, "machine-written") {
-				t.Errorf("pass %d body must still say a machine wrote it:\n%s", pass, body)
+			if strings.Contains(body, "machine-written") {
+				t.Errorf("pass %d body still carries the disclaimer that was removed:\n%s", pass, body)
 			}
 		}
 	}

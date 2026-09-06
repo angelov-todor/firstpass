@@ -101,15 +101,17 @@ const ExitUnknown = -1
 // pass number, a link back to this repository and two sentences of
 // disclaimer; the owner asked for none of it.
 //
-// What stays is the one thing a reader cannot work out for themselves: that a
-// machine wrote this and it is not a human review. It is submitted under the
-// operator's own GitHub identity, so without that sentence a colleague has no
-// way to tell.
+// The machine-written disclaimer went too, at the owner's instruction: the
+// team knows these reviews are automated, and a sentence saying so on every
+// one of them is the boilerplate this trimming exists to remove. Recorded
+// because it is the one removal that is not purely cosmetic -- these are
+// submitted under the operator's own GitHub identity, so nothing in the body
+// now distinguishes them from a review that person wrote. That is the owner's
+// call about their own team and their own name.
 //
-// What also stays, on a later pass, is the scope sentence -- see
-// verdictScopeLater. It is not framing; it is the difference between "this
-// change is fine" and "the newest commits are fine".
-const machineWritten = "Automated review — machine-written, not a human review."
+// What stays, on a later pass, is the scope sentence -- see verdictScopeLater.
+// It is not framing; it is the difference between "this change is fine" and
+// "the newest commits are fine".
 
 // verdictScopeLater is kept for later passes and nothing else.
 //
@@ -123,9 +125,9 @@ const verdictScopeLater = "This pass covered the commits added since the previou
 
 func verdictBodyApprove(pass int) string {
 	if pass > 1 {
-		return machineWritten + " No findings needing a change.\n\n" + verdictScopeLater
+		return "No findings needing a change.\n\n" + verdictScopeLater
 	}
-	return machineWritten + " No findings needing a change."
+	return "No findings needing a change."
 }
 
 // verdictBodyFindings is submitted when the reviewer raised something blocking
@@ -143,9 +145,9 @@ func verdictBodyApprove(pass int) string {
 // wastes their time and makes the tool look broken, which is worse than
 // admitting firstpass could not confirm it.
 func verdictBodyFindings(pass int, posted bool) string {
-	b := machineWritten + " Findings are posted in a comment on this pull request."
+	b := "Findings are posted in a comment on this pull request."
 	if !posted {
-		b = machineWritten + " Findings were raised, but firstpass could not confirm they " +
+		b = "Findings were raised, but firstpass could not confirm they " +
 			"were posted here. If you cannot see them, ask the operator for the review report " +
 			"rather than assuming the review found nothing."
 	}
@@ -162,8 +164,7 @@ func verdictBodyFindings(pass int, posted bool) string {
 // plainly rather than dressing it up as findings: the review found nothing to
 // change, and it is deliberately not approving anyway.
 func verdictBodyWithheld(pass int, reason string) string {
-	b := machineWritten + " No findings needing a change, but no approval submitted: " +
-		reason + "."
+	b := "No findings needing a change, but no approval submitted: " + reason + "."
 	if pass > 1 {
 		b += "\n\n" + verdictScopeLater
 	}
