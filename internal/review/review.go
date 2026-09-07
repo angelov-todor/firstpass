@@ -102,6 +102,12 @@ type Runner struct {
 	// means reviews say nothing about compliance and the system prompt is
 	// exactly what it was before this existed.
 	docsRoot string
+
+	// Log, when non-nil, records the one thing this package can decide and
+	// then silently degrade: dropping sibling context that will not fit on a
+	// command line. Silent degradation is the failure mode this project has
+	// been bitten by most often, so the one place it can happen says so.
+	Log func(msg string, args ...any)
 }
 
 // New builds a review runner. extraArgs comes from config and normally carries
@@ -512,19 +518,38 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 		system += "\n\n" + note
 	}
 	// Last, and deliberately so. The siblings are the largest block in the
-	// system prompt -- two diffs of up to 40 KB -- and everything above it is
-	// either identical across every review in a repository or short. Putting
-	// the bulk at the end keeps the stable prefix cacheable, and keeps the
-	// material about *this* pull request from being buried under material
-	// about the others.
+	// system prompt, and everything above it is either identical across every
+	// review in a repository or short. Putting the bulk at the end keeps the
+	// stable prefix cacheable, keeps the material about *this* pull request
+	// from being buried under material about the others, and makes the
+	// oversize check below able to drop it without disturbing anything else.
+	prompt := rr.Prompt(ref) + priorClause(prior)
+
+	// The sibling block is added only if the command line can carry it, and it
+	// is the piece that gives way because it is the only one that is both
+	// large and optional: context for judging the change, where everything
+	// else is the job itself. Dropping it costs a cross-repository
+	// observation; dropping anything else costs the review.
+	//
+	// Decided before assembly rather than by trimming afterwards. A system
+	// prompt cut to length can end in the middle of somebody else's diff,
+	// leaving the reviewer holding a fragment it may read as an instruction.
 	if note := siblingNote(ref.Key(), siblings); note != "" {
-		system += "\n\n" + note
+		if withSibs := system + "\n\n" + note; fits(prompt, withSibs) {
+			system = withSibs
+		} else if rr.Log != nil {
+			rr.Log("sibling context dropped from a review prompt", "key", ref.Key(),
+				"siblings", len(siblings), "would_be_bytes", len(prompt)+len(withSibs),
+				"budget", argvBudget,
+				"why", "a command line over the operating system's limit fails to exec, and a "+
+					"failed exec is a review that never happens")
+		}
 	}
 
 	// extraArgs stays last: it is operator-controlled config, so it must keep
 	// being able to override anything firstpass sets for itself.
 	args := []string{
-		"-p", rr.Prompt(ref) + priorClause(prior),
+		"-p", prompt,
 		"--append-system-prompt", system,
 	}
 	if rr.docsRoot != "" {

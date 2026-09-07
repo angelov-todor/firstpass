@@ -24,14 +24,28 @@ const (
 // excerptWidth bounds one index line. The index exists so the reviewer cannot
 // miss that feedback exists; the full text is a `gh` call away, and the URL of
 // each item is included so it is a cheap one.
-const excerptWidth = 160
+//
+// 100 rather than 160 because of where this ends up. The index travels inside
+// a single --append-system-prompt argument, and Windows caps a process's whole
+// command line at 32,767 characters. At sixty items of 160 characters plus a
+// path and a URL each, the index alone was around 18 KB -- most of the budget,
+// before the change under review or any sibling context. That was a latent
+// exec failure waiting for a busy pull request, and an exec failure is a
+// review recorded as needs_attention and never retried.
+const excerptWidth = 100
 
 // maxFeedbackItems caps the index.
 //
 // Exceeding it sets Truncated, and a truncated index is treated as no index at
 // all for approval purposes: "there is more you have not been shown" cannot
 // support "everything raised here has been addressed".
-const maxFeedbackItems = 60
+// Reduced from sixty for the same reason as excerptWidth: the index shares a
+// command line with everything else firstpass sends. Twenty-five items is
+// still more feedback than any pull request in this codebase's history has
+// carried -- the busiest measured had seven -- and Truncated says so when
+// there are more, which withholds the approval rather than pretending the list
+// is complete.
+const maxFeedbackItems = 25
 
 // FeedbackItem is one piece of existing feedback on a pull request.
 type FeedbackItem struct {

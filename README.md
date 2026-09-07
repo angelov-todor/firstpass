@@ -394,9 +394,21 @@ Details worth knowing:
   sibling they share; collision-free copies would mean up to nine checkouts of
   large service repos on disk for one three-way post. A diff is also the
   artifact the cross-check needs — often for what it does *not* contain.
-- **At most two siblings**, each capped at 40 KB. A post listing eight PRs
-  cannot bury the change actually under review, and a cut diff says it was cut
-  so the reviewer does not read a missing change as evidence there was none.
+- **At most two siblings, each capped at 6 KB** — and that number comes from
+  Windows, not taste. A process's whole command line is capped at 32,767
+  characters, and the diffs travel inside a single `--append-system-prompt`
+  argument. Measured on this machine: a 33,000-character argument fails with
+  `fork/exec: The filename or extension is too long`, and a failed exec is a
+  review recorded `needs_attention` and never retried — so an oversized prompt
+  would leave a PR that reviewed fine yesterday permanently unreviewed.
+  `review.Run` checks the total independently and drops the sibling block
+  (never truncates it) if it will not fit, saying so in the log.
+- A cut diff says it was cut, so the reviewer does not read a missing change as
+  evidence there was none.
+- **A sibling outside `allow_owners` is never fetched.** The chat space is a
+  chat room, not an access boundary: a link to an unrelated repository turns up
+  eventually, and the same rule that stops firstpass reviewing it stops
+  firstpass reading it.
 - **A sibling that cannot be fetched costs context, not the review.** This is
   deliberately the opposite of the feedback fetch, which withholds an
   approval: an approval makes a claim about the feedback, while a review makes

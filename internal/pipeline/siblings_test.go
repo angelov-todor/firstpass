@@ -157,3 +157,69 @@ func TestSiblingsAreCappedSoOneReviewCannotBeBuried(t *testing.T) {
 		}
 	}
 }
+
+// TestASiblingOutsideTheAllowlistIsNeverFetched is the gate that was missing.
+//
+// handle states the rule at its very first gate: a repository outside
+// allow_owners must never be queried, let alone cloned. A sibling is a query.
+// The chat space is a chat room, not an access boundary -- somebody eventually
+// pastes a link to an unrelated repository next to a real one -- and without
+// this firstpass would run `gh pr diff` against that repository and paste
+// several kilobytes of it into a prompt.
+func TestASiblingOutsideTheAllowlistIsNeverFetched(t *testing.T) {
+	h := siblingHarness(t, prURL("aex-backoffice", 319)+
+		" https://github.com/some-other-org/private-thing/pull/7")
+	h.apply()
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	h.prs.mu.Lock()
+	fetched := append([]string(nil), h.prs.diffFor...)
+	h.prs.mu.Unlock()
+	for _, k := range fetched {
+		if strings.Contains(k, "some-other-org") {
+			t.Errorf("a repository outside allow_owners was queried for a diff: %v", fetched)
+		}
+	}
+	h.rev.mu.Lock()
+	defer h.rev.mu.Unlock()
+	for i, sibs := range h.rev.sibs {
+		for _, s := range sibs {
+			if strings.Contains(s.Key, "some-other-org") {
+				t.Errorf("%s was shown a pull request outside allow_owners: %s", h.rev.ran[i], s.Key)
+			}
+		}
+	}
+}
+
+// TestASiblingDiffIsFetchedOncePerSweep bounds what this feature costs in
+// GitHub calls.
+//
+// A three-way post produces three reviews, each wanting the other two diffs:
+// six fetches of three distinct diffs without a cache. Rate limits are the
+// ceiling on concurrency here, not the machine, so halving the calls matters
+// more than the map costs.
+func TestASiblingDiffIsFetchedOncePerSweep(t *testing.T) {
+	h := siblingHarness(t, prURL("a", 1)+" "+prURL("b", 2)+" "+prURL("c", 3))
+	h.cfg.ReviewConcurrency = 1 // serial, so the cache is exercised rather than raced
+	h.apply()
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	h.prs.mu.Lock()
+	defer h.prs.mu.Unlock()
+	seen := map[string]int{}
+	for _, k := range h.prs.diffFor {
+		seen[k]++
+	}
+	for k, n := range seen {
+		if n > 1 {
+			t.Errorf("%s's diff was fetched %d times in one sweep; the cache should make it 1 "+
+				"(all fetches: %v)", k, n, h.prs.diffFor)
+		}
+	}
+}
