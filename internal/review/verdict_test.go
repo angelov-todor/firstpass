@@ -110,7 +110,7 @@ func TestRunReturnsTheParsedVerdict(t *testing.T) {
 			f := &runner.Fake{Replies: []runner.Reply{
 				{Match: "Review pull request", Result: runner.Result{Stdout: []byte(tc.stdout)}},
 			}}
-			res, err := New(f, "claude", nil, false, t.TempDir()).Run(context.Background(), "work", ref, nil, nil)
+			res, err := New(f, "claude", nil, false, t.TempDir()).Run(context.Background(), "work", ref, nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -216,7 +216,7 @@ func TestBothModesPassTheSameVerdictInstructionToClaude(t *testing.T) {
 		f := &runner.Fake{Replies: []runner.Reply{
 			{Match: "Review pull request", Result: runner.Result{Stdout: []byte("x")}},
 		}}
-		if _, err := New(f, "claude", nil, dry, t.TempDir()).Run(context.Background(), "work", ref, nil, nil); err != nil {
+		if _, err := New(f, "claude", nil, dry, t.TempDir()).Run(context.Background(), "work", ref, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		args := f.Calls[0].Args
@@ -253,7 +253,7 @@ func TestDryRunReportStatesTheWouldBeVerdict(t *testing.T) {
 			f := &runner.Fake{Replies: []runner.Reply{
 				{Match: "Review pull request", Result: runner.Result{Stdout: []byte(tc.stdout)}},
 			}}
-			res, err := New(f, "claude", nil, true, t.TempDir()).Run(context.Background(), "work", ref, nil, nil)
+			res, err := New(f, "claude", nil, true, t.TempDir()).Run(context.Background(), "work", ref, nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

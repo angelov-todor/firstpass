@@ -41,7 +41,7 @@ func TestTheAskAndTheEvidenceTravelInDifferentChannels(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, false, t.TempDir())
 
-	if _, err := rr.Run(t.Context(), "work", ref, nil, samplePrior()); err != nil {
+	if _, err := rr.Run(t.Context(), "work", ref, nil, samplePrior(), nil); err != nil {
 		t.Fatal(err)
 	}
 	args := f.Calls[0].Args
@@ -135,7 +135,7 @@ func TestAPullRequestWithNoFeedbackAsksExactlyWhatItAlwaysDid(t *testing.T) {
 		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("done")}},
 	}}
 	rr := New(f, "claude", nil, false, t.TempDir())
-	if _, err := rr.Run(t.Context(), "work", ref, nil, &PriorFeedback{}); err != nil {
+	if _, err := rr.Run(t.Context(), "work", ref, nil, &PriorFeedback{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	args := f.Calls[0].Args

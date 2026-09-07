@@ -68,8 +68,13 @@ func openApp(configPath string, live bool, withReview bool) (*app, error) {
 	}
 	if withReview {
 		p.WTs = worktree.New(r, cfg.Paths.Git, cfg.ReposDir(), cfg.WorkDir())
-		p.Rev = review.New(r, cfg.Paths.Claude, cfg.ClaudeArgs, cfg.DryRun, cfg.ReportsDir()).
+		rev := review.New(r, cfg.Paths.Claude, cfg.ClaudeArgs, cfg.DryRun, cfg.ReportsDir()).
 			WithDocs(cfg.DocsRoot)
+		// So the one place the review package degrades silently -- dropping
+		// sibling context that will not fit on a command line -- says so in
+		// the operator's own log.
+		rev.Log = log.Warn
+		p.Rev = rev
 	}
 	// Reactions are outward-facing, so a dry run gets no reactor at all. The
 	// pipeline refuses to react in a dry run on its own account too; two

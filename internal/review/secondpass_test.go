@@ -38,7 +38,7 @@ func TestSecondPassNoteReachesTheSystemPromptAndNotThePrompt(t *testing.T) {
 	f := fakeWithReply("posted")
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, false, t.TempDir())
 
-	if _, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}, nil); err != nil {
+	if _, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.Calls) != 1 {
@@ -79,7 +79,7 @@ func TestFirstPassArgvCarriesNoSecondPassNote(t *testing.T) {
 	f := fakeWithReply("no findings")
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, true, t.TempDir())
 
-	if _, err := rr.Run(context.Background(), "work", ref, nil, nil); err != nil {
+	if _, err := rr.Run(context.Background(), "work", ref, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -99,11 +99,11 @@ func TestThePromptIsByteIdenticalAcrossPasses(t *testing.T) {
 	for _, dry := range []bool{true, false} {
 		first, second := fakeWithReply("x"), fakeWithReply("x")
 		if _, err := New(first, "claude", nil, dry, t.TempDir()).
-			Run(context.Background(), "work", ref, nil, nil); err != nil {
+			Run(context.Background(), "work", ref, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := New(second, "claude", nil, dry, t.TempDir()).
-			Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}, nil); err != nil {
+			Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		a := first.Calls[0].Args[slices.Index(first.Calls[0].Args, "-p")+1]
@@ -147,12 +147,12 @@ func TestADryRunSecondPassReportDoesNotOverwriteTheFirst(t *testing.T) {
 	dir := t.TempDir()
 
 	rr := New(fakeWithReply("first pass findings"), "claude", nil, true, dir)
-	first, err := rr.Run(context.Background(), "work", ref, nil, nil)
+	first, err := rr.Run(context.Background(), "work", ref, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rr = New(fakeWithReply("second pass findings"), "claude", nil, true, dir)
-	second, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}, nil)
+	second, err := rr.Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: true}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestTheIncompleteNoteAlsoTravelsAsASystemPromptAndNotInThePrompt(t *testing
 	rr := New(f, "claude", nil, false, t.TempDir())
 	pp := &PreviousPass{HeadSHA: prevSHA, Posted: true, Incomplete: true}
 
-	if _, err := rr.Run(context.Background(), "work", ref, pp, nil); err != nil {
+	if _, err := rr.Run(context.Background(), "work", ref, pp, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -311,7 +311,7 @@ func TestAPreviousPassThatPostedNothingSendsNoNote(t *testing.T) {
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, false, t.TempDir())
 
 	if _, err := rr.Run(context.Background(), "work", ref,
-		&PreviousPass{HeadSHA: prevSHA, Posted: false}, nil); err != nil {
+		&PreviousPass{HeadSHA: prevSHA, Posted: false}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -331,12 +331,12 @@ func TestAPreviousPassThatPostedNothingSendsNoNote(t *testing.T) {
 func TestAPassAfterAnUnpostedOneStillGetsItsOwnReportName(t *testing.T) {
 	dir := t.TempDir()
 	first, err := New(fakeWithReply("pass one"), "claude", nil, true, dir).
-		Run(context.Background(), "work", ref, nil, nil)
+		Run(context.Background(), "work", ref, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	second, err := New(fakeWithReply("pass two"), "claude", nil, true, dir).
-		Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: false}, nil)
+		Run(context.Background(), "work", ref, &PreviousPass{HeadSHA: prevSHA, Posted: false}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

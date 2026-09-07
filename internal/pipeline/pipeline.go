@@ -40,6 +40,9 @@ type (
 		// the code -- so its job is to make sure the reviewer is shown every
 		// point that exists, and to refuse an approval when it could not.
 		FetchFeedback(ctx context.Context, ref prref.PRRef) (ghpr.Feedback, error)
+		// PRDiff returns a pull request's diff, and whether it was cut. Used
+		// for the pull requests posted alongside the one under review.
+		PRDiff(ctx context.Context, ref prref.PRRef) (diff string, truncated bool, err error)
 		// SubmitReview submits the verdict of a finished review. It is on
 		// this interface rather than left to the prompt so the action is
 		// firstpass's: recorded in the store, visible in status, and
@@ -61,8 +64,11 @@ type (
 		// surface and every author. It is what makes an approval mean
 		// something about the whole change rather than only the newest
 		// commits.
+		//
+		// siblings are the other pull requests posted in the same chat
+		// message. They arrive as diffs, for context only.
 		Run(ctx context.Context, dir string, ref prref.PRRef, previous *review.PreviousPass,
-			prior *review.PriorFeedback) (review.Result, error)
+			prior *review.PriorFeedback, siblings []review.Sibling) (review.Result, error)
 	}
 	// Reactor puts reactions on chat messages, so the team can see that a
 	// posted pull request has been picked up. Everything it does is
@@ -169,6 +175,91 @@ func verdictBodyWithheld(pass int, reason string) string {
 		b += "\n\n" + verdictScopeLater
 	}
 	return b
+}
+
+// siblingContext fetches the diffs of the other pull requests posted in the
+// same message, for the reviewer to judge this one against.
+//
+// Failures are skipped, not propagated. Context is an improvement to a review,
+// never a precondition for one: a sibling whose diff cannot be fetched -- a
+// deleted branch, a rate limit, a repository the token cannot read -- costs
+// this review some context and must not cost it the review. That is the
+// opposite of the feedback fetch, which gates the approval, and the difference
+// is that an approval makes a claim about the feedback while a review makes no
+// claim about its siblings.
+func (p *Pipeline) siblingContext(ctx context.Context, c candidate, st *sweepState) []review.Sibling {
+	var out []review.Sibling
+	for _, ref := range c.siblings {
+		// The allowlist applies here exactly as it applies to the pull request
+		// under review. handle states the rule at its first gate -- a repo
+		// outside the allowlist must never be queried, let alone cloned -- and
+		// a sibling is a query. The chat space is a chat room: a link to an
+		// unrelated repository turns up in it eventually, and without this
+		// firstpass would run `gh pr diff` against that repository and paste
+		// its contents into a prompt.
+		if !p.Cfg.OwnerAllowed(ref.Owner) || p.Cfg.RepoDenied(ref.Owner, ref.Repo) {
+			p.Log.Warn("a pull request posted alongside this one is outside allow_owners; "+
+				"it is not fetched and not shown to the reviewer",
+				"key", c.ref.Key(), "sibling", ref.Key())
+			continue
+		}
+
+		diff, truncated, err := st.siblingDiff(ctx, ref, func(dctx context.Context) (string, bool, error) {
+			return p.PRs.PRDiff(dctx, ref)
+		}, p.Cfg.GHTimeout.D())
+		if err != nil {
+			// "key" is the pull request being reviewed, as it is on every other
+			// line in this package; the sibling gets its own field. Filed the
+			// other way round, a warning about lost context would be indexed
+			// under a pull request this sweep is not reviewing.
+			p.Log.Warn("could not fetch a sibling pull request's diff; the review runs without "+
+				"that context", "key", c.ref.Key(), "sibling", ref.Key(), "err", err)
+			continue
+		}
+		out = append(out, review.Sibling{
+			Key:       ref.Key(),
+			URL:       ref.URL(),
+			Diff:      diff,
+			Truncated: truncated,
+			Status:    p.siblingStatus(ref),
+		})
+	}
+	return out
+}
+
+// siblingStatus reports what firstpass's own records say about a sibling.
+//
+// It reports, rather than predicts. The first version answered a boolean --
+// "firstpass is reviewing this one separately" -- computed as "the record is
+// not a completed review", which is true of every skipped outcome: a draft,
+// one of the operator's own pull requests, a merged one. So the reviewer was
+// told somebody else would handle exactly the pull requests nobody would look
+// at, and stayed quiet about the only problems it was uniquely placed to
+// mention.
+//
+// A read failure says so rather than guessing, for the same reason.
+func (p *Pipeline) siblingStatus(ref prref.PRRef) string {
+	rec, ok, err := p.Store.Review(ref.Key())
+	switch {
+	case err != nil:
+		return "unknown -- firstpass could not read its own record"
+	case !ok:
+		return ""
+	}
+	switch rec.Outcome {
+	case store.OutcomeReviewed:
+		return "already reviewed by firstpass; its comments are on it"
+	case store.OutcomeInFlight:
+		return "being reviewed by firstpass right now, in its own separate review"
+	case store.OutcomeNeedsAttention:
+		return "a review of it did not finish; nothing else is looking at it until somebody asks"
+	default:
+		// Every skipped outcome: the operator's own, a closed or merged pull
+		// request, an owner outside the allowlist, an expired backlog entry.
+		// Nothing else will look at it, and that is the case where a problem
+		// spotted here is worth mentioning.
+		return "not reviewed by firstpass (" + string(rec.Outcome) + "); nothing else will look at it"
+	}
 }
 
 // ownFeedbackCount counts the items on a pull request authored by the
@@ -508,6 +599,15 @@ type candidate struct {
 	// or a backfill offers messages older than the review they triggered. Zero
 	// for a candidate with no chat message behind it.
 	triggerAt time.Time
+	// siblings are the other pull requests named in the same chat message,
+	// in the order they appeared, excluding this one.
+	//
+	// A message carrying several links is the team stating that those changes
+	// belong together -- an API change and its frontend, a service change and
+	// its deployment. Reviewed apart, neither review can see whether the two
+	// halves agree. Empty for a lone post and for anything re-offered from the
+	// pending backlog, which has no message to group by.
+	siblings []prref.PRRef
 	// previous is the record of a pass that has already reviewed this pull
 	// request, carried in rather than read by handle. Only ReviewOne sets it:
 	// a replay bypasses the record gate, which is where every other candidate
@@ -823,6 +923,32 @@ func (p *Pipeline) appendRecoveredDecisions(rep *SweepReport) {
 	}
 }
 
+// maxSiblings bounds how many of a post's other pull requests reach the
+// reviewer as context.
+//
+// Three per group, so two siblings. Each is a diff of up to 40 KB, so a full
+// group costs roughly twenty thousand tokens of context on top of the change
+// under review -- affordable, and bounded so that a post listing eight pull
+// requests cannot bury the one being reviewed. The first two in the message
+// are taken, which is the order the author wrote them in and therefore the
+// best available guess at which matter most.
+const maxSiblings = 2
+
+// others returns every ref except the one at skip, capped at maxSiblings.
+func others(refs []prref.PRRef, skip int) []prref.PRRef {
+	var out []prref.PRRef
+	for i, r := range refs {
+		if i == skip {
+			continue
+		}
+		out = append(out, r)
+		if len(out) == maxSiblings {
+			break
+		}
+	}
+	return out
+}
+
 // candidates lists the refs to consider: everything in the new messages,
 // walked oldest-first so the earliest post is recorded as the trigger, followed
 // by refs still parked in the pending bucket.
@@ -831,12 +957,21 @@ func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
 	seen := map[string]bool{}
 
 	for i := len(msgs) - 1; i >= 0; i-- {
-		for _, ref := range prref.Extract(msgs[i].Text) {
+		refs := prref.Extract(msgs[i].Text)
+		for j, ref := range refs {
 			if seen[ref.Key()] {
 				continue
 			}
 			seen[ref.Key()] = true
-			out = append(out, candidate{ref: ref, trigger: msgs[i].Name, triggerAt: msgs[i].CreateTime})
+			out = append(out, candidate{
+				ref: ref, trigger: msgs[i].Name, triggerAt: msgs[i].CreateTime,
+				// Every other ref this message carried, whether or not it was
+				// already claimed by a newer message. The siblings describe
+				// what the post said, not what this sweep happens to be
+				// reviewing: a pull request posted twice is still the sibling
+				// of everything alongside it here.
+				siblings: others(refs, j),
+			})
 		}
 	}
 
@@ -1140,6 +1275,15 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 		}
 	}()
 
+	// The other pull requests this post carried, as context for judging this
+	// one.
+	//
+	// After the reservation, not before it. The comment above claims a
+	// candidate turned away by the cap costs nothing, and fetching two sibling
+	// diffs first made that false -- two GitHub calls spent on a review that
+	// was never going to run.
+	sibs := p.siblingContext(ctx, c, st)
+
 	// A bare clone of a whole repository is the longest subprocess firstpass
 	// runs, and on Windows a credential prompt can stall it indefinitely.
 	p.progress(Event{Stage: StagePreparingWorktree, Ref: ref, Index: idx, Total: total})
@@ -1232,7 +1376,7 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 
 	reviewStarted = true
 	p.progress(Event{Stage: StageReviewStarted, Ref: ref, Index: idx, Total: total})
-	res, rerr := p.Rev.Run(rctx, dir, ref, prevPass, prior)
+	res, rerr := p.Rev.Run(rctx, dir, ref, prevPass, prior, sibs)
 	done := p.now()
 
 	rec.DecidedAt = done

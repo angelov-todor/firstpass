@@ -62,6 +62,14 @@ type fakePRs struct {
 	submitted []submittedVerdict
 	submitErr error
 
+	// diffs, diffErr and diffTruncated drive PRDiff; diffFor records which
+	// siblings were actually fetched, so a test can prove a lone post fetches
+	// nothing.
+	diffs         map[string]string
+	diffErr       map[string]error
+	diffTruncated map[string]bool
+	diffFor       []string
+
 	// feedback is what FetchFeedback returns; feedbackErr makes it fail, which
 	// must leave the review running but unable to approve.
 	feedback    ghpr.Feedback
@@ -107,6 +115,23 @@ func (f *fakePRs) FetchFeedback(_ context.Context, ref prref.PRRef) (ghpr.Feedba
 		return ghpr.Feedback{}, f.feedbackErr
 	}
 	return f.feedback, nil
+}
+
+// PRDiff serves the sibling context. Defaults to an empty diff, which is a
+// successful fetch of a pull request that changed nothing -- enough for the
+// common case where a test does not care. diffFor supplies real ones.
+func (f *fakePRs) PRDiff(_ context.Context, ref prref.PRRef) (string, bool, error) {
+	f.mu.Lock()
+	f.diffFor = append(f.diffFor, ref.Key())
+	f.mu.Unlock()
+	if err, ok := f.diffErr[ref.Key()]; ok {
+		return "", false, err
+	}
+	d, ok := f.diffs[ref.Key()]
+	if !ok {
+		return "", false, nil
+	}
+	return d, f.diffTruncated[ref.Key()], nil
 }
 
 func (f *fakePRs) SubmitReview(_ context.Context, ref prref.PRRef, verdict, body string) error {
@@ -171,6 +196,9 @@ type fakeRev struct {
 	// commit the pass before it looked at and whether that pass finished --
 	// and that a first pass told it nothing at all.
 	prevPasses []*review.PreviousPass
+	// sibs records the sibling context handed to each invocation, so a test can
+	// prove the reviewer was shown the pull requests posted alongside this one.
+	sibs [][]review.Sibling
 	// priors records the prior feedback handed to each invocation, so a test
 	// can prove the reviewer was actually shown what is already on the pull
 	// request rather than merely that firstpass fetched it.
@@ -178,12 +206,13 @@ type fakeRev struct {
 }
 
 func (f *fakeRev) Run(ctx context.Context, _ string, ref prref.PRRef, previous *review.PreviousPass,
-	prior *review.PriorFeedback) (review.Result, error) {
+	prior *review.PriorFeedback, siblings []review.Sibling) (review.Result, error) {
 
 	f.mu.Lock()
 	f.ran = append(f.ran, ref.Key())
 	f.prevPasses = append(f.prevPasses, previous)
 	f.priors = append(f.priors, prior)
+	f.sibs = append(f.sibs, siblings)
 	f.mu.Unlock()
 
 	if f.duringRun != nil {
@@ -234,9 +263,13 @@ func newHarness(t *testing.T, msgs []chat.Message) *harness {
 	cfg.AllowOwners = []string{"Example-Org"}
 
 	h := &harness{
-		st:  st,
-		ch:  &fakeChat{msgs: msgs},
-		prs: &fakePRs{info: map[string]ghpr.PRInfo{}, err: map[string]error{}},
+		st: st,
+		ch: &fakeChat{msgs: msgs},
+		prs: &fakePRs{
+			info: map[string]ghpr.PRInfo{}, err: map[string]error{},
+			diffs: map[string]string{}, diffErr: map[string]error{},
+			diffTruncated: map[string]bool{},
+		},
 		wts: &fakeWTs{},
 		rev: &fakeRev{},
 		cfg: cfg,

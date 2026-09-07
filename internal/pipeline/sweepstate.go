@@ -1,6 +1,12 @@
 package pipeline
 
-import "sync"
+import (
+	"context"
+	"sync"
+	"time"
+
+	"github.com/angelov-todor/firstpass/internal/prref"
+)
 
 // sweepState is the state that candidates share while a sweep is running.
 //
@@ -25,6 +31,16 @@ type sweepState struct {
 	reviewed       int
 	recordFailed   bool
 	pausedMidSweep bool
+
+	// diffs caches sibling diffs for the life of one sweep; see siblingDiff.
+	diffs map[string]cachedDiff
+}
+
+// cachedDiff is one sibling's diff, or the failure to fetch it.
+type cachedDiff struct {
+	diff      string
+	truncated bool
+	err       error
 }
 
 func newSweepState(maxReviews int) *sweepState {
@@ -117,4 +133,47 @@ func (s *sweepState) pausedMid() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.pausedMidSweep
+}
+
+// siblingDiff fetches a pull request's diff at most once per sweep.
+//
+// A three-way post produces three reviews, each wanting the other two diffs:
+// six fetches of three distinct diffs without a cache. GitHub calls are the
+// resource this project has least of -- rate limits are the ceiling on
+// concurrency, not the machine -- so halving them is worth a map.
+//
+// Cached per sweep rather than for longer. A pull request's diff changes when
+// somebody pushes, and a sweep is short enough that treating it as fixed
+// within one is safe while treating it as fixed across a day is not.
+//
+// Failures are cached too. A sibling in a forbidden state fails the same way
+// for every member of the group, and retrying it twice more only spends the
+// budget again to learn the same thing.
+func (s *sweepState) siblingDiff(ctx context.Context, ref prref.PRRef,
+	fetch func(context.Context) (string, bool, error), timeout time.Duration) (string, bool, error) {
+
+	key := ref.Key()
+	s.mu.Lock()
+	if s.diffs == nil {
+		s.diffs = map[string]cachedDiff{}
+	}
+	if c, ok := s.diffs[key]; ok {
+		s.mu.Unlock()
+		return c.diff, c.truncated, c.err
+	}
+	s.mu.Unlock()
+
+	// Fetched outside the lock: this is a network call, and holding the
+	// sweep's lock across it would serialise every concurrent review's
+	// bookkeeping behind it. Two reviews racing on the same sibling fetch it
+	// twice, which is the cost of not holding a lock across a subprocess and
+	// is bounded by the group size.
+	fctx, cancel := context.WithTimeout(ctx, timeout)
+	diff, truncated, err := fetch(fctx)
+	cancel()
+
+	s.mu.Lock()
+	s.diffs[key] = cachedDiff{diff: diff, truncated: truncated, err: err}
+	s.mu.Unlock()
+	return diff, truncated, err
 }
