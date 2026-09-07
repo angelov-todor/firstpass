@@ -76,36 +76,66 @@ func TestNoApprovalOverAnOutstandingRequestForChanges(t *testing.T) {
 	}
 }
 
-// TestNoApprovalWhenTheFeedbackCouldNotBeRead is the fail-safe.
+// TestAFailedFeedbackFetchDefersInsteadOfReviewing replaces
+// TestNoApprovalWhenTheFeedbackCouldNotBeRead, whose premise a live outage
+// disproved.
 //
-// An approval now asserts something firstpass cannot check for itself: that
-// every point already raised has been addressed. That assertion rests entirely
-// on the list of prior feedback shown to the reviewer, so when firstpass could
-// not build that list, the assertion has nothing under it. The review still
-// runs and its comments are still posted -- a review that cannot approve is
-// worth having -- but the approval is withheld.
-func TestNoApprovalWhenTheFeedbackCouldNotBeRead(t *testing.T) {
+// That test asserted the review should run anyway and merely lose its
+// approval, on the reasoning that a review which cannot approve is still worth
+// having. What actually happened: GitHub was unreachable for about ninety
+// seconds, two pull requests were reviewed without their feedback lists, both
+// had their approvals withheld, and both were recorded `reviewed` -- which is
+// terminal. So a colleague's pull request was left permanently unapproved,
+// carrying a comment about firstpass's own limitation, with nothing that would
+// ever try again.
+//
+// Retrying just the gate after the review was the tempting fix and is wrong:
+// an approval asserts that everything already raised has been addressed, and a
+// reviewer that was never shown what was raised cannot support that claim
+// however healthy the network is by the time the verdict is submitted.
+//
+// Deferring costs nothing, which is what makes this the right answer rather
+// than a trade: the fetch happens before the clone and before the review, so
+// the pull request is offered again on the next sweep with its whole attempt
+// and age budget intact.
+func TestAFailedFeedbackFetchDefersInsteadOfReviewing(t *testing.T) {
 	h, f := gateHarness(t, review.VerdictApprove,
-		runner.Result{ExitCode: 1, Stderr: []byte("gh: API rate limit exceeded")})
+		runner.Result{ExitCode: 1, Stderr: []byte("gh: dial tcp: connection attempt failed")})
 
-	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	// The review must still have happened.
+	// No review, so no comments on anybody's pull request and no verdict.
 	h.rev.mu.Lock()
 	ran := len(h.rev.ran)
 	h.rev.mu.Unlock()
-	if ran != 1 {
-		t.Fatalf("the review must still run when the feedback fetch fails, ran=%d", ran)
+	if ran != 0 {
+		t.Errorf("the review must not run without the feedback list, ran=%d", ran)
+	}
+	if calls := ghReviewCalls(f); len(calls) != 0 {
+		t.Errorf("nothing may be submitted, got %d gh pr review calls", len(calls))
+	}
+	if d, ok := decisionFor(rep, verdictKey); !ok || d.Action != ActionDefer {
+		t.Fatalf("want a deferral, got %+v", d)
 	}
 
-	args := strings.Join(ghReviewCalls(f)[0].Args, " ")
-	if strings.Contains(args, "--approve") {
-		t.Errorf("approved without being able to read the existing feedback: %s", args)
+	// And it must be parked, or "offered again next sweep" is a hope rather
+	// than a mechanism: the chat message that triggered it scrolls out of the
+	// fetch window.
+	all, perr := h.st.AllPending()
+	if perr != nil {
+		t.Fatal(perr)
 	}
-	if rec := reviewRecord(t, h); rec.Verdict != store.VerdictWithheld {
-		t.Errorf("Verdict = %q, want withheld", rec.Verdict)
+	if len(all) != 1 || all[0].Key != verdictKey {
+		t.Fatalf("the pull request must be parked for a later sweep, got %+v", all)
+	}
+	// No terminal record, which is what made the old behaviour permanent.
+	if rec, ok, rerr := h.st.Review(verdictKey); rerr != nil {
+		t.Fatal(rerr)
+	} else if ok && rec.Outcome == store.OutcomeReviewed {
+		t.Errorf("a deferral must not leave a terminal reviewed record: %+v", rec)
 	}
 }
 
@@ -125,6 +155,37 @@ func TestNoApprovalWhenTheFeedbackListIsIncomplete(t *testing.T) {
 	}
 	if rec := reviewRecord(t, h); rec.Verdict != store.VerdictWithheld {
 		t.Errorf("Verdict = %q, want withheld", rec.Verdict)
+	}
+}
+
+// TestATruncatedListAlsoWithholdsThePostingClaim is the second half of the
+// same distrust.
+//
+// The posting check compares how many items the operator had authored before
+// the review with how many after. A truncated list undercounts the before, so
+// a pull request the operator had already commented on can show an increase
+// this review did not cause -- and the body would then state as fact that the
+// findings are posted when they may not be. An unverifiable answer has to
+// produce the hedge, not the claim.
+//
+// This was live for an hour: during the outage the baseline was zero because
+// the fetch had failed, so any pre-existing comment would have been read as
+// proof of posting. It was right on the pull request it happened to run on, by
+// luck.
+func TestATruncatedListAlsoWithholdsThePostingClaim(t *testing.T) {
+	truncated := strings.Replace(emptyFeedbackJSON,
+		`"comments":{"totalCount":0`, `"comments":{"totalCount":99`, 1)
+	h, f := gateHarness(t, review.VerdictFindings, runner.Result{Stdout: []byte(truncated)})
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join(ghReviewCalls(f)[0].Args, " ")
+	if strings.Contains(body, "Findings are posted in a comment on this pull request") {
+		t.Errorf("posting must not be claimed from an untrustworthy baseline:\n%s", body)
+	}
+	if !strings.Contains(body, "could not confirm they") {
+		t.Errorf("the body must hedge instead:\n%s", body)
 	}
 }
 

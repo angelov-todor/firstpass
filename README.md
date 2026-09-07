@@ -103,10 +103,22 @@ One sweep, on a ticker or on demand:
    - **A human has requested changes.** firstpass never submits an approval
      over an outstanding `CHANGES_REQUESTED`; under your identity that reads as
      you clearing a colleague's block.
-   - **The feedback could not be read.** An approval asserts that everything
-     raised has been addressed, and that assertion rests entirely on the list
-     firstpass gathered. If the list failed or came back incomplete, the review
-     still runs and still comments — but it cannot approve.
+   - **The list came back incomplete.** GitHub answered and said there is more
+     than it returned. An approval asserts that everything raised has been
+     addressed, and a partial list cannot support that, so the review still
+     runs and still comments — but it cannot approve, and it does not claim its
+     findings were posted either, because a truncated list undercounts the
+     baseline that claim is measured against.
+
+   If the feedback **cannot be read at all**, the PR is **deferred** rather
+   than reviewed: the fetch happens before the clone, so it costs nothing, and
+   the PR is offered again on the next sweep. This was learned in production. A
+   ninety-second GitHub outage produced two reviews without their feedback
+   lists, both approvals withheld and both records terminal — leaving a
+   colleague's PR permanently unapproved, carrying a comment about firstpass's
+   own limitation, with nothing that would ever try again. Retrying just the
+   gate after the review would not fix it: a reviewer that was never shown what
+   was raised cannot support the claim that it has all been addressed.
 
    Either case records `approval withheld` in `status` and posts a comment
    review saying the review found nothing to change and why it is not
