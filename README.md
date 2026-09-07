@@ -373,6 +373,42 @@ request costs more than the finding could have been worth.
 indistinguishable from reviews with nothing to say about compliance, which is
 the failure mode hardest to notice.
 
+## Related pull requests
+
+When several PR links arrive in one chat message, the team is saying those
+changes belong together — an API change and its frontend, a service change and
+its deployment. Reviewed apart, neither review can see whether the two halves
+agree.
+
+Each PR still gets its own review, its own verdict and its own comment. What
+changes is that every review is handed the **diffs of the others from the same
+message**, as context. Reviewing the API change, the reviewer can see that the
+frontend PR posted alongside it never renamed the field; reviewing the
+frontend, that the API renamed it. The finding lands on whichever PR it
+concerns.
+
+Details worth knowing:
+
+- **Diffs, not checkouts.** Worktree paths are per pull request, so two
+  concurrent reviews of the same post would want the same directory for the
+  sibling they share; collision-free copies would mean up to nine checkouts of
+  large service repos on disk for one three-way post. A diff is also the
+  artifact the cross-check needs — often for what it does *not* contain.
+- **At most two siblings**, each capped at 40 KB. A post listing eight PRs
+  cannot bury the change actually under review, and a cut diff says it was cut
+  so the reviewer does not read a missing change as evidence there was none.
+- **A sibling that cannot be fetched costs context, not the review.** This is
+  deliberately the opposite of the feedback fetch, which withholds an
+  approval: an approval makes a claim about the feedback, while a review makes
+  no claim about its siblings.
+- **The reviewer is told not to review them** — and told whether firstpass is
+  reviewing each one separately. A sibling under review will get its own
+  comments; one that is not (a draft, your own, already reviewed) gets no
+  other look, which changes whether a problem spotted there is worth
+  mentioning.
+- A PR re-offered from the pending backlog has no siblings: there is no
+  message to group it by.
+
 ## Concurrency
 
 By default reviews are serial: one pull request is reviewed to completion

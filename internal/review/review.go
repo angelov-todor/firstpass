@@ -482,7 +482,7 @@ func (e *ReportError) Unwrap() error { return e.Err }
 // dry-run report's filename: the -p value is byte-identical across passes,
 // because everything in it is /code-review's own arguments.
 func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous *PreviousPass,
-	prior *PriorFeedback) (Result, error) {
+	prior *PriorFeedback, siblings []Sibling) (Result, error) {
 
 	system := verdictInstruction
 	// Ordered deliberately, and the order is the whole point of putting this
@@ -509,6 +509,15 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 	// measured: an instruction in the system prompt is not reliably followed
 	// over a long agentic run, while data there is simply available.
 	if note := priorNote(prior); note != "" {
+		system += "\n\n" + note
+	}
+	// Last, and deliberately so. The siblings are the largest block in the
+	// system prompt -- two diffs of up to 40 KB -- and everything above it is
+	// either identical across every review in a repository or short. Putting
+	// the bulk at the end keeps the stable prefix cacheable, and keeps the
+	// material about *this* pull request from being buried under material
+	// about the others.
+	if note := siblingNote(ref.Key(), siblings); note != "" {
 		system += "\n\n" + note
 	}
 

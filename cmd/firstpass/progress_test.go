@@ -328,6 +328,10 @@ func (quietTestPRs) FetchFeedback(context.Context, prref.PRRef) (ghpr.Feedback, 
 	return ghpr.Feedback{}, nil
 }
 
+func (quietTestPRs) PRDiff(context.Context, prref.PRRef) (string, bool, error) {
+	return "", false, nil
+}
+
 func (quietTestPRs) SubmitReview(_ context.Context, ref prref.PRRef, verdict, _ string) error {
 	return fmt.Errorf("this test must submit no verdict, got %q for %s", verdict, ref.Key())
 }
@@ -340,7 +344,7 @@ func (quietTestWTs) Prepare(context.Context, prref.PRRef) (string, func(), error
 
 type quietTestRev struct{}
 
-func (quietTestRev) Run(context.Context, string, prref.PRRef, *review.PreviousPass, *review.PriorFeedback) (review.Result, error) {
+func (quietTestRev) Run(context.Context, string, prref.PRRef, *review.PreviousPass, *review.PriorFeedback, []review.Sibling) (review.Result, error) {
 	return review.Result{}, nil
 }
 

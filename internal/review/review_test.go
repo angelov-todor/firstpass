@@ -83,7 +83,7 @@ func TestRunInvokesClaudeInTheWorktreeWithConfiguredArgs(t *testing.T) {
 	}}
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, true, t.TempDir())
 
-	if _, err := rr.Run(context.Background(), filepath.Join("work", "aex-balances"), ref, nil, nil); err != nil {
+	if _, err := rr.Run(context.Background(), filepath.Join("work", "aex-balances"), ref, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.Calls) != 1 {
@@ -114,7 +114,7 @@ func TestRunPassesTheLivePromptInOrder(t *testing.T) {
 	}}
 	rr := New(f, "claude", []string{"--permission-mode", "bypassPermissions"}, false, t.TempDir())
 
-	if _, err := rr.Run(context.Background(), "work", ref, nil, nil); err != nil {
+	if _, err := rr.Run(context.Background(), "work", ref, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.Calls) != 1 {
@@ -137,7 +137,7 @@ func TestRunWritesAReportInDryRun(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, true, dir)
 
-	res, err := rr.Run(context.Background(), "work", ref, nil, nil)
+	res, err := rr.Run(context.Background(), "work", ref, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestEvenAnApprovingLiveReviewKeepsItsOutput(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, false, dir)
 
-	res, err := rr.Run(context.Background(), "work", ref, nil, nil)
+	res, err := rr.Run(context.Background(), "work", ref, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestALiveReviewWithNoVerdictKeepsItsOutput(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, false, dir)
 
-	res, err := rr.Run(context.Background(), "work", ref, nil, nil)
+	res, err := rr.Run(context.Background(), "work", ref, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestALiveFindingsReviewKeepsItsOutput(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, false, dir)
 
-	res, err := rr.Run(t.Context(), "work", ref, nil, nil)
+	res, err := rr.Run(t.Context(), "work", ref, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestRunSurfacesNonZeroExit(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, true, t.TempDir())
 
-	res, err := rr.Run(context.Background(), "work", ref, nil, nil)
+	res, err := rr.Run(context.Background(), "work", ref, nil, nil, nil)
 	if err == nil {
 		t.Fatal("a non-zero claude exit must be an error so the PR is not recorded as reviewed")
 	}
@@ -292,7 +292,7 @@ func TestRunSurfacesTimeout(t *testing.T) {
 	}}
 	rr := New(f, "claude", nil, false, t.TempDir())
 
-	if _, err := rr.Run(context.Background(), "work", ref, nil, nil); err == nil {
+	if _, err := rr.Run(context.Background(), "work", ref, nil, nil, nil); err == nil {
 		t.Fatal("a timeout must be an error: the deadline can fire mid-post")
 	}
 }

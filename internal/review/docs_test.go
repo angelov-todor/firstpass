@@ -59,7 +59,7 @@ func TestNoDocsRootChangesNothing(t *testing.T) {
 		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("done")}},
 	}}
 	rr := New(f, "claude", nil, true, t.TempDir())
-	if _, err := rr.Run(t.Context(), "work", ref, nil, nil); err != nil {
+	if _, err := rr.Run(t.Context(), "work", ref, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	args := f.Calls[0].Args
@@ -74,7 +74,7 @@ func TestTheDocsNoteReachesTheSystemPromptWhenConfigured(t *testing.T) {
 		{Match: "Review pull request", Result: runner.Result{Stdout: []byte("done")}},
 	}}
 	rr := New(f, "claude", nil, true, t.TempDir()).WithDocs(root)
-	if _, err := rr.Run(t.Context(), "work", ref, nil, nil); err != nil {
+	if _, err := rr.Run(t.Context(), "work", ref, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	args := f.Calls[0].Args
