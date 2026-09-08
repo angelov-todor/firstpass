@@ -16,6 +16,7 @@ commands:
   watch     sweep on a ticker until interrupted
   status    what has been reviewed, skipped or deferred
   replay    review one PR again, ignoring the dedupe record
+  clear     mark one PR's needs_attention record handled
   doctor    check every external dependency
   pause     stop reviewing and posting; sweeps keep queueing
   resume    undo pause
@@ -51,6 +52,8 @@ func main() {
 		err = cmdStatus(args)
 	case "replay":
 		err = cmdReplay(args)
+	case "clear":
+		err = cmdClear(args)
 	case "doctor":
 		err = cmdDoctor(args)
 	case "pause":

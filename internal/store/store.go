@@ -24,6 +24,11 @@ const (
 	OutcomeNeedsAttention Outcome = "needs_attention"
 	OutcomeExpired        Outcome = "expired"
 	OutcomeInFlight       Outcome = "in_flight"
+	// OutcomeCleared is a needs_attention or in_flight record a human dealt
+	// with by hand and then marked, with `firstpass clear`. Terminal like the
+	// rest, and deliberately distinct from reviewed: firstpass did not review
+	// this pull request, so saying it did would be a false record.
+	OutcomeCleared Outcome = "cleared"
 )
 
 // Terminal reports whether the outcome closes the book on a pull request.

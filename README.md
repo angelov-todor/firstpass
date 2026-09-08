@@ -394,12 +394,40 @@ configured Google Chat account can actually see named spaces).
 - `replay <pr-url | owner/repo#n>` — force one PR through review again,
   ignoring the dedupe record but telling the reviewer that an earlier pass has
   already been here. Flags: `-live`, `-quiet`.
+- `clear <pr-url | owner/repo#n>` — mark a `needs_attention` or `in_flight`
+  record handled, once a human has dealt with it. Flag: `-note text`.
 - `doctor` — preflight every external dependency.
 - `pause` / `resume` — write / remove a kill-switch file. While paused,
   sweeps still queue new PRs but run no reviews and post nothing.
 
 Every command accepts `-config <path>` to point at a config file other than
 the default.
+
+### Clearing a record a human has dealt with
+
+`needs_attention` is terminal, and rightly: a review that died part-way through
+may have posted half its comments, so a person has to look. But once that
+person has looked, there was no way to say so. The row asked for attention in
+`firstpass status` forever, and the only thing that moved it was `firstpass
+replay` — which reviews the pull request again, possibly long after it merged.
+
+`firstpass clear <pr>` marks it, and marks rather than deletes. Deleting the
+row would take the dedupe record with it, so the same link posted again in chat
+— a colleague bumping an old thread — would review from scratch something
+already dealt with. A `cleared` outcome is terminal like the rest, and
+deliberately distinct from `reviewed`: firstpass did not review that pull
+request, and recording that it had would be a false record.
+
+The original detail is kept inside the new one, because it is the only account
+of what went wrong and exists nowhere else once the log rotates. Only the two
+outcomes that ask for attention are clearable — clearing a settled row could
+only lose information, and clearing a `reviewed` one would overwrite the record
+of a verdict firstpass actually submitted on somebody's pull request. Any
+backlog entry goes too, since a pull request declared handled must not be
+re-offered by the next sweep.
+
+The store takes an exclusive lock, so like `status`, this runs while the daemon
+is stopped.
 
 ## Compliance
 
