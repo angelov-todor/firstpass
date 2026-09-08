@@ -1,5 +1,10 @@
 /firstpass
 *.exe
+# Building while the daemon is running renames the live image rather than
+# failing, so a rebuild leaves the previous binary behind as firstpass.exe~ --
+# which *.exe does not match. Untracked and 5 MB, it is exactly the kind of
+# thing a `git add -A` commits by accident.
+*.exe~
 /dist/
 *.db
 /reports/
