@@ -4,6 +4,7 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,11 @@ const (
 	OutcomeNeedsAttention Outcome = "needs_attention"
 	OutcomeExpired        Outcome = "expired"
 	OutcomeInFlight       Outcome = "in_flight"
+	// OutcomeCleared is a needs_attention or in_flight record a human dealt
+	// with by hand and then marked, with `firstpass clear`. Terminal like the
+	// rest, and deliberately distinct from reviewed: firstpass did not review
+	// this pull request, so saying it did would be a false record.
+	OutcomeCleared Outcome = "cleared"
 )
 
 // Terminal reports whether the outcome closes the book on a pull request.
@@ -346,6 +352,15 @@ func Open(path string) (*Store, error) {
 	}
 	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
+		// bbolt takes an exclusive lock on the file, so one firstpass at a
+		// time. Said plainly, because bolt reports it as the bare word
+		// "timeout" -- and the operator meeting that message is running a
+		// one-shot command against a live daemon, which is the ordinary
+		// mistake, not a corrupt database.
+		if errors.Is(err, bolt.ErrTimeout) {
+			return nil, fmt.Errorf("%s is already open by another firstpass process; "+
+				"stop the daemon (or wait for the sweep to finish) and try again", path)
+		}
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
