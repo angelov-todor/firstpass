@@ -365,6 +365,15 @@ func checkSource(ctx context.Context, prs *ghpr.Client, src config.Source, login
 	}
 	detail := fmt.Sprintf("%s: %d scanned, %d matched, %d after bots",
 		src.Owner, page.Scanned, len(page.Found), kept)
+	// Reported, not failed. GitHub sets incomplete_results on its own account
+	// -- this query draws it on every call against a real organisation -- and
+	// no configuration change clears it, so failing here would be a check that
+	// fails forever and tells the operator to do something that does not help.
+	// The next sweep re-runs the query, so what one search missed the next
+	// offers.
+	if page.Partial {
+		detail += " (GitHub returned partial results; the next sweep re-runs the search)"
+	}
 	// A full page is reported as a failure, because it is the one outcome the
 	// operator has to act on: pull requests exist that firstpass will never
 	// see until the noisiest authors are excluded.

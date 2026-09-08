@@ -187,17 +187,33 @@ func TestTruncationIsCountedBeforeFiltering(t *testing.T) {
 	}
 }
 
-// GitHub reporting incomplete_results means the same thing to an operator as a
-// full page: pull requests exist that this search did not see.
-func TestIncompleteResultsIsTruncation(t *testing.T) {
-	c, _ := discoverFake(`{"total_count":1,"incomplete_results":true,"items":[
+// GitHub's incomplete_results is not truncation, and the distinction is the
+// point: the two call for opposite responses.
+//
+// A full page is the operator's to fix -- exclude the noisiest authors. A
+// partial search is GitHub giving up part way, and no configuration change
+// clears it: measured against a real organisation, three identical calls
+// returned 6, 8 and 9 of a reported 9, with the flag set every time. Folding
+// it into Truncated made doctor fail permanently while advising a fix that
+// does nothing.
+func TestPartialResultsAreNotTruncation(t *testing.T) {
+	c, _ := discoverFake(`{"total_count":9,"incomplete_results":true,"items":[
 {"number":1,"repository_url":"https://api.github.com/repos/o/r","updated_at":"2026-09-07T08:30:00Z",
  "user":{"login":"u","type":"User"},"pull_request":{}}]}`)
 	page, err := c.Discover(context.Background(), Query{Owner: "o", ReviewRequestedFor: "l"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !page.Truncated {
-		t.Error("incomplete_results must be reported as truncation")
+	if !page.Partial {
+		t.Error("incomplete_results must be reported")
+	}
+	if page.Truncated {
+		t.Error("one item against a limit of a hundred is not a full page, whatever " +
+			"GitHub says about completeness")
+	}
+	// And the pull requests it did return are still used: a partial answer is
+	// most of an answer, and the next sweep asks again.
+	if len(page.Found) != 1 {
+		t.Errorf("a partial search still yields what it found, got %d", len(page.Found))
 	}
 }

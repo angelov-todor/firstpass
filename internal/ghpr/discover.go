@@ -83,8 +83,22 @@ type Page struct {
 	// Scanned is how many items GitHub returned, before any filtering.
 	Scanned int
 	// Truncated reports that the page was full, so pull requests exist that
-	// this search did not see.
+	// this search did not see. Actionable: exclude the noisiest authors, or
+	// raise the limit.
 	Truncated bool
+	// Partial reports GitHub's own incomplete_results -- its search gave up
+	// part way and returned what it had.
+	//
+	// Kept apart from Truncated, which it was briefly folded into, because the
+	// two call for opposite responses and the advice for one is wrong for the
+	// other. Nothing the operator configures fixes this: measured against a
+	// real organisation, three identical calls returned 6, 8 and 9 of a
+	// reported 9, with incomplete_results set every time.
+	//
+	// It is also not worth alarming anybody about. Discovery re-runs every
+	// sweep, so a pull request missed by one partial search is offered by the
+	// next -- five minutes later, having lost nothing but the delay.
+	Partial bool
 }
 
 // Discover lists the pull requests matching the query.
@@ -175,11 +189,9 @@ func (c *Client) Discover(ctx context.Context, q Query) (Page, error) {
 	return Page{
 		Found:   out,
 		Scanned: len(raw.Items),
-		// Counted before filtering: see Page. GitHub also reports
-		// incomplete_results when it timed out internally, which means the
-		// same thing to an operator -- pull requests exist that this search
-		// did not see.
-		Truncated: len(raw.Items) >= limit || raw.IncompleteResults,
+		// Counted before filtering: see Page.
+		Truncated: len(raw.Items) >= limit,
+		Partial:   raw.IncompleteResults,
 	}, nil
 }
 

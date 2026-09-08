@@ -56,6 +56,13 @@ func (p *Pipeline) discover(ctx context.Context) []sourceFound {
 		// from a page of results they never see. Without the exclusions this
 		// operator's own query returns 327 pull requests of which 314 are
 		// dependabot, so a full page is the expected symptom.
+		// Info, not Warn: nothing the operator can configure fixes a partial
+		// search, and the next sweep re-runs the query, so a pull request this
+		// one missed is offered five minutes later.
+		if page.Partial {
+			p.Log.Info("a source's search came back partial; anything it missed will be "+
+				"offered again next sweep", "owner", src.Owner, "scanned", page.Scanned)
+		}
 		if page.Truncated {
 			p.Log.Warn("a source returned a full page, so some pull requests were not seen; "+
 				"add the noisiest authors to exclude_authors",
