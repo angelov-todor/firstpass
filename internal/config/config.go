@@ -88,6 +88,48 @@ type Config struct {
 	DocsRoot string `yaml:"docs_root"`
 	StateDir string `yaml:"state_dir"`
 	Paths    Paths  `yaml:"paths"`
+	// Sources are the extra places firstpass looks for pull requests, beyond
+	// the chat space.
+	//
+	// The chat space is not listed here and is not optional. It is where the
+	// team asks for reviews, it carries the two things no other source can --
+	// which pull requests were posted together, and somewhere to react -- and
+	// making it one entry among many would mean a config file could silently
+	// turn it off.
+	Sources []Source `yaml:"sources"`
+}
+
+// Source is one additional place to find pull requests.
+type Source struct {
+	// Type is "github" and nothing else so far. Named rather than implied so
+	// a second kind can be added without changing what is already written in
+	// people's config files.
+	Type string `yaml:"type"`
+	// Owner is the organisation to search.
+	Owner string `yaml:"owner"`
+	// ReviewRequested restricts the search to pull requests with a review
+	// requested from this login, defaulting to github_login.
+	//
+	// There is deliberately no way to ask for "every open pull request".
+	// Measured on this operator's organisation that is over five hundred, each
+	// costing a clone and a claude run, and each one a comment on a
+	// colleague's pull request nobody asked for. A review request is the same
+	// property the chat space provides: somebody asked.
+	ReviewRequested string `yaml:"review_requested"`
+	// RepoPrefixes keeps only repositories whose name starts with one of
+	// these. Empty means every repository under the owner.
+	RepoPrefixes []string `yaml:"repo_prefixes"`
+	// ExcludeAuthors are logins left out of the search itself. Bots are what
+	// this is for: 314 of the 327 pull requests with a review requested from
+	// this operator were dependabot, so without the exclusion the real ones
+	// are crowded off the page.
+	ExcludeAuthors []string `yaml:"exclude_authors"`
+	// ExcludeBots drops anything GitHub reports as authored by a bot, whatever
+	// its login. ExcludeAuthors keeps the query to one page; this catches the
+	// bot nobody has added to that list yet.
+	ExcludeBots bool `yaml:"exclude_bots"`
+	// Limit caps the page, up to GitHub's hundred.
+	Limit int `yaml:"limit"`
 }
 
 // Default is the shipped configuration: safe, but not yet usable. Space,
@@ -261,6 +303,11 @@ func (c Config) Validate() error {
 	if c.FetchLimit <= 0 {
 		return errors.New("fetch_limit must be positive")
 	}
+	for i, src := range c.Sources {
+		if err := src.validate(i, c); err != nil {
+			return err
+		}
+	}
 	if c.ChatTimeout.D() <= 0 {
 		return errors.New("chat_timeout must be positive: chat.py would otherwise run unbounded")
 	}
@@ -334,3 +381,40 @@ func (c Config) PauseFile() string  { return filepath.Join(c.StateDir, "PAUSE") 
 func (c Config) ReportsDir() string { return filepath.Join(c.StateDir, "reports") }
 func (c Config) ReposDir() string   { return filepath.Join(c.StateDir, "repos") }
 func (c Config) WorkDir() string    { return filepath.Join(c.StateDir, "work") }
+
+// Login is who a source requires a review request from: its own setting, or
+// the operator by default. A source that searched with no login at all would
+// be the every-open-pull-request query, so this never falls through to empty.
+func (s Source) Login(githubLogin string) string {
+	if s.ReviewRequested != "" {
+		return s.ReviewRequested
+	}
+	return githubLogin
+}
+
+func (s Source) validate(i int, c Config) error {
+	if s.Type != "github" {
+		return fmt.Errorf("sources[%d]: unknown type %q (the only source type is \"github\")", i, s.Type)
+	}
+	if s.Owner == "" {
+		return fmt.Errorf("sources[%d]: owner is required", i)
+	}
+	if s.Login(c.GithubLogin) == "" {
+		return fmt.Errorf("sources[%d]: review_requested is required when github_login is unset", i)
+	}
+	// The owner allowlist is what stops firstpass commenting on strangers'
+	// pull requests, and it is applied per candidate regardless of where the
+	// candidate came from. A source pointed outside it is therefore not
+	// dangerous -- every candidate it produced would be refused -- but it is
+	// certainly a mistake, and one that looks in the log exactly like a broken
+	// search rather than a misconfigured one. Said plainly at startup instead.
+	if !c.OwnerAllowed(s.Owner) {
+		return fmt.Errorf("sources[%d]: owner %q is not in allow_owners, so every pull request "+
+			"it found would be refused", i, s.Owner)
+	}
+	if s.Limit < 0 || s.Limit > 100 {
+		return fmt.Errorf("sources[%d]: limit must be between 1 and 100 (0 means GitHub's "+
+			"maximum of 100)", i)
+	}
+	return nil
+}

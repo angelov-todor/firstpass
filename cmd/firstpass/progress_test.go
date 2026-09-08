@@ -328,6 +328,10 @@ func (quietTestPRs) FetchFeedback(context.Context, prref.PRRef) (ghpr.Feedback, 
 	return ghpr.Feedback{}, nil
 }
 
+func (quietTestPRs) Discover(context.Context, ghpr.Query) ([]ghpr.Found, error) {
+	return nil, nil
+}
+
 func (quietTestPRs) PRDiff(context.Context, prref.PRRef) (string, bool, error) {
 	return "", false, nil
 }

@@ -429,6 +429,67 @@ re-offered by the next sweep.
 The store takes an exclusive lock, so like `status`, this runs while the daemon
 is stopped.
 
+## Sources
+
+firstpass watches the chat space. A **source** is an extra place it looks —
+today, pull requests with a review requested from you on GitHub.
+
+```yaml
+sources:
+  - type: github
+    owner: AstraBit-CPT
+    repo_prefixes: [aex-]
+    exclude_authors: [app/dependabot]
+    exclude_bots: true
+```
+
+The chat space is not listed there and is not optional. It is where the team
+asks for reviews, and it carries the two things a search cannot: which pull
+requests were posted together, and a message to react to. A source is an
+addition to it, so a GitHub outage or a rate limit costs firstpass the
+discovered pull requests for one sweep and never the posted ones.
+
+**A source finds pull requests with a review requested from you, and there is
+deliberately no mode that finds everything.** Measured against a real
+organisation, "every open pull request" is over five hundred — each a clone, a
+claude run, and a comment on a colleague's pull request nobody asked for. A
+review request is the same property that makes the chat space work: somebody
+asked.
+
+`exclude_authors` goes into the search query itself, which is what keeps the
+result to a single request. Bots dominate a review-requested queue — 314 of 327
+on the organisation this was built against — so without the exclusion the real
+pull requests are crowded off the page. `exclude_bots` is the second net, for
+the bot nobody has added to that list yet, and firstpass warns when a page
+comes back full.
+
+### One review per commit, whichever source found it
+
+A pull request posted in chat and returned by a search is reviewed **once**.
+The chat message wins the tie, because it is the one that carries the sibling
+group and something to react to.
+
+A pull request already reviewed at its current head is **not** reviewed again
+until there is a follow-up commit. That rule predates sources and is enforced
+in one place — the head SHA gate below `Inspect`, which does not know or care
+which source offered the candidate.
+
+What each source has is a cheap *prompt*: a reason to spend one `gh pr view`
+asking whether the head has moved. For chat that is a newer post; for a source
+it is GitHub's `updated_at` being later than the last decision. Neither is
+permission to review. GitHub moves `updated_at` for a comment as readily as for
+a push, so a discussed pull request is offered again and turned away by the SHA
+gate — the prompt is deliberately generous and the gate is exact. Without the
+prompt, discovery would spend one GitHub call per pull request per sweep for no
+new information, and firstpass shares that rate limit with the reviews.
+
+Discovery is one request per source per sweep, through `gh api search/issues`
+rather than `gh search prs`: the author exclusions have no flags on that
+command, which quotes a positional query as free-text keywords and silently
+returns the wrong thing. Results are truncated rather than paged, because
+paging that endpoint trips GitHub's secondary rate limit within a few requests
+— and a discovery step that can starve the reviews is a bad trade.
+
 ## Compliance
 
 `docs_root` is optional. Set it to a checkout of the project's specifications
