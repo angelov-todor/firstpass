@@ -183,10 +183,13 @@ func verdictBodyWithheld(pass int, reason string) string {
 // Failures are skipped, not propagated. Context is an improvement to a review,
 // never a precondition for one: a sibling whose diff cannot be fetched -- a
 // deleted branch, a rate limit, a repository the token cannot read -- costs
-// this review some context and must not cost it the review. That is the
-// opposite of the feedback fetch, which gates the approval, and the difference
-// is that an approval makes a claim about the feedback while a review makes no
-// claim about its siblings.
+// this review some context and must not cost it the review.
+//
+// That is the opposite of the feedback fetch, which defers the whole review
+// when it fails. The difference is what each one supports: an approval claims
+// that everything already raised has been addressed, so a reviewer that never
+// saw what was raised cannot be asked for one, while nothing about a review
+// claims anything about its siblings.
 func (p *Pipeline) siblingContext(ctx context.Context, c candidate, st *sweepState) []review.Sibling {
 	var out []review.Sibling
 	for _, ref := range c.siblings {
@@ -1231,26 +1234,63 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 	// the reviewer can be shown it and so the approval gates below have
 	// something to stand on.
 	//
-	// A failure here does not abandon the review: a review that cannot approve
-	// is still worth having, and the alternative -- skipping the pull request
-	// because a second GitHub call failed -- trades a whole review for a
-	// verdict. What it does do is make an approval impossible, and tell the
-	// reviewer its list is incomplete.
+	// A failure here defers the pull request rather than reviewing without the
+	// list; see the branch below for why that is not the trade it first looks
+	// like.
 	prior := &review.PriorFeedback{}
 	gate := verdictGate{feedbackUsable: true}
 	fbctx, cancelFeedback := context.WithTimeout(ctx, p.Cfg.GHTimeout.D())
 	fb, ferr := p.PRs.FetchFeedback(fbctx, ref)
 	cancelFeedback()
 	if ferr != nil {
-		p.Log.Warn("could not read the existing feedback on this pull request; the review will "+
-			"run but cannot end in an approval", "key", ref.Key(), "err", ferr)
-		gate.feedbackUsable = false
-		prior.Incomplete = true
-	} else {
-		prior = toPriorFeedback(fb)
-		gate.feedbackUsable = fb.Usable()
-		gate.changesRequested = fb.ChangesRequested()
+		// Deferred, exactly as the two store-read failures above are, and for
+		// a reason a live outage taught: reviewing without this list produces
+		// a review that can never approve and a record that says `reviewed`,
+		// so the pull request is finished with. A GitHub blip lasting ninety
+		// seconds thereby left a colleague's pull request permanently
+		// unapproved, carrying a comment about firstpass's own limitation, and
+		// with no mechanism to try again.
+		//
+		// Retrying just the gate after the review was the tempting fix and is
+		// wrong: an approval asserts that everything already raised has been
+		// addressed, and a reviewer that was never shown what was raised
+		// cannot support that claim however healthy the network is by the time
+		// the verdict is submitted.
+		//
+		// Deferring costs nothing, which is what makes it the right answer
+		// here rather than a trade. This fetch happens before the clone and
+		// before the review, so the pull request is simply offered again on
+		// the next sweep -- five minutes later, with the whole attempt and age
+		// budget still in front of it.
+		p.Log.Warn("could not read the existing feedback on this pull request; deferring rather "+
+			"than reviewing without it", "key", ref.Key(), "err", ferr)
+		// deferAttempt, not hold: an attempt is counted, exactly as it is for a
+		// failed Inspect and a failed sibling fetch.
+		//
+		// hold looked kinder and is worse. A transient outage costs a handful
+		// of attempts out of twenty and the pull request is reviewed as soon as
+		// GitHub answers. A failure specific to one pull request -- a GraphQL
+		// timeout on the three-way fifty-node query for a change with hundreds
+		// of comments, while `gh pr view` still succeeds -- fails identically
+		// every five minutes. Uncounted, that is seven days of re-offering,
+		// some two thousand futile Inspect-and-fetch pairs, a review that never
+		// happens, and finally `expired` anyway. Counted, it gives up in about
+		// an hour and a half and says so.
+		//
+		// ferr is deliberately not passed to note(): that channel is for store
+		// writes failing, and it holds the whole batch's watermark with a log
+		// line about records that could not be written. A GitHub error is
+		// neither, and the pending park below is what guarantees the re-offer.
+		note(p.deferAttempt(c, "feedback read failed: "+ferr.Error(), opts))
+		return dec(ActionDefer, "feedback read failed: "+ferr.Error())
 	}
+	prior = toPriorFeedback(fb)
+	// Truncated, not failed: GitHub answered and said there is more than it
+	// returned. That is a real and persistent condition rather than a blip --
+	// deferring would defer forever -- so the review proceeds, the reviewer is
+	// told its list is incomplete, and the approval is withheld.
+	gate.feedbackUsable = fb.Usable()
+	gate.changesRequested = fb.ChangesRequested()
 
 	// Claim a review slot before the clone, which is the first expensive step,
 	// so a candidate turned away by the cap costs nothing. Counted as an
@@ -1396,7 +1436,14 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 	// existing feedback before the review, so it knows how many items the
 	// operator had authored beforehand. Live only -- a dry run posts nothing by
 	// design and there is nothing to verify.
-	if !p.Cfg.DryRun && rerr == nil && res.Verdict == review.VerdictFindings {
+	//
+	// Only when the baseline is trustworthy. The check compares the operator's
+	// item count before and after, and a list that came back truncated
+	// undercounts the before -- so a pull request the operator had already
+	// commented on could show an increase that this review did not cause, and
+	// the body would state as fact that the findings are posted when they may
+	// not be. An unverifiable answer must produce the hedge, not the claim.
+	if !p.Cfg.DryRun && rerr == nil && res.Verdict == review.VerdictFindings && gate.feedbackUsable {
 		gate.findingsPosted = p.findingsReachedThePR(ctx, ref, ownFeedbackCount(fb, p.Cfg.GithubLogin))
 	}
 
