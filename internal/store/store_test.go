@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -297,5 +298,35 @@ func TestOpenUpgradesADatabaseWithoutTheMessagesBucket(t *testing.T) {
 	}
 	if _, ok, err := s.Message("spaces/A/messages/m1"); err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+}
+
+// TestOpenSaysWhoHasItWhenTheStoreIsLocked covers the message an operator is
+// most likely to meet from this package.
+//
+// bbolt takes an exclusive lock, so a one-shot command -- `status`, `clear`,
+// `replay` -- run against a live daemon fails. It reported that as the bare
+// word "timeout", which reads like a corrupt database rather than the
+// ordinary mistake it is.
+//
+// Costs the five-second lock timeout to run, which is the whole point of it:
+// there is no other way to reach the branch.
+func TestOpenSaysWhoHasItWhenTheStoreIsLocked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "firstpass.db")
+	held, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	_, err = Open(path)
+	if err == nil {
+		t.Fatal("a second Open must not succeed while the first holds the lock")
+	}
+	if !strings.Contains(err.Error(), "already open by another firstpass") {
+		t.Errorf("the error must say what is wrong and what to do: %v", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("the error must name the file: %v", err)
 	}
 }
