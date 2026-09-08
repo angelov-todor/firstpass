@@ -396,7 +396,9 @@ configured Google Chat account can actually see named spaces).
   already been here. Flags: `-live`, `-quiet`.
 - `clear <pr-url | owner/repo#n>` — mark a `needs_attention` or `in_flight`
   record handled, once a human has dealt with it. Flag: `-note text`.
-- `doctor` — preflight every external dependency.
+- `doctor` — preflight every external dependency, and run each configured
+  source's real query, reporting what came back. A full page is reported as a
+  failure: it means pull requests exist that firstpass will never see.
 - `pause` / `resume` — write / remove a kill-switch file. While paused,
   sweeps still queue new PRs but run no reviews and post nothing.
 
@@ -482,6 +484,12 @@ a push, so a discussed pull request is offered again and turned away by the SHA
 gate — the prompt is deliberately generous and the gate is exact. Without the
 prompt, discovery would spend one GitHub call per pull request per sweep for no
 new information, and firstpass shares that rate limit with the reviews.
+
+`firstpass doctor` runs each source's query for real and prints what came
+back — scanned, matched, and how many survived the bot filter. A source that
+returns nothing otherwise looks exactly like a quiet week: a typo in the login,
+an owner with no review requests and a `repo_prefixes` matching no repository
+all produce the same silence as a working source on a calm day.
 
 Discovery is one request per source per sweep, through `gh api search/issues`
 rather than `gh search prs`: the author exclusions have no flags on that

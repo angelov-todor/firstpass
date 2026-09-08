@@ -51,7 +51,7 @@ type (
 		// Discover lists pull requests a configured source offers. One
 		// request per source per sweep; see ghpr.Discover for why it is not
 		// paged.
-		Discover(ctx context.Context, q ghpr.Query) ([]ghpr.Found, error)
+		Discover(ctx context.Context, q ghpr.Query) (ghpr.Page, error)
 	}
 	Worktrees interface {
 		Prepare(ctx context.Context, ref prref.PRRef) (dir string, cleanup func(), err error)

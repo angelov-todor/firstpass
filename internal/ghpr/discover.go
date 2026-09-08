@@ -69,6 +69,24 @@ type rawSearch struct {
 	} `json:"items"`
 }
 
+// Page is one search's worth of results.
+//
+// Truncated is carried here rather than computed from len(Found) because the
+// two counts are not the same: Found has been filtered by repo_prefixes, so a
+// full page of a hundred pull requests in repositories the source does not
+// want yields a handful of results. Deriving truncation from the filtered
+// count, as this first did, silently disabled the warning in exactly the
+// configuration that needs it -- a narrow prefix over a queue full of
+// dependabot, where real pull requests are the ones being pushed off the page.
+type Page struct {
+	Found []Found
+	// Scanned is how many items GitHub returned, before any filtering.
+	Scanned int
+	// Truncated reports that the page was full, so pull requests exist that
+	// this search did not see.
+	Truncated bool
+}
+
 // Discover lists the pull requests matching the query.
 //
 // One request per sweep, through the search API rather than `gh search prs`,
@@ -81,9 +99,9 @@ type rawSearch struct {
 // the same budget on every review it runs, so a discovery step that can starve
 // reviews is a bad trade for pull requests further down a list sorted by
 // recency.
-func (c *Client) Discover(ctx context.Context, q Query) ([]Found, error) {
+func (c *Client) Discover(ctx context.Context, q Query) (Page, error) {
 	if q.Owner == "" || q.ReviewRequestedFor == "" {
-		return nil, fmt.Errorf("a github source needs both an owner and a login to " +
+		return Page{}, fmt.Errorf("a github source needs both an owner and a login to " +
 			"require a review request from")
 	}
 	limit := q.Limit
@@ -113,16 +131,16 @@ func (c *Client) Discover(ctx context.Context, q Query) ([]Found, error) {
 		// requests most likely to have moved since the last review.
 		"-f", "sort=updated", "-f", "order=desc")
 	if err != nil {
-		return nil, fmt.Errorf("gh api search/issues: %w", err)
+		return Page{}, fmt.Errorf("gh api search/issues: %w", err)
 	}
 	if res.ExitCode != 0 {
-		return nil, fmt.Errorf("gh api search/issues exit %d: %s",
+		return Page{}, fmt.Errorf("gh api search/issues exit %d: %s",
 			res.ExitCode, strings.TrimSpace(string(res.Stderr)))
 	}
 
 	var raw rawSearch
 	if err := json.Unmarshal(res.Stdout, &raw); err != nil {
-		return nil, fmt.Errorf("decode search results: %w", err)
+		return Page{}, fmt.Errorf("decode search results: %w", err)
 	}
 
 	var out []Found
@@ -154,18 +172,15 @@ func (c *Client) Discover(ctx context.Context, q Query) ([]Found, error) {
 		}
 		out = append(out, f)
 	}
-	return out, nil
-}
-
-// Truncated reports whether a discovery result hit its page limit, which is
-// the operator's signal that a bot they have not excluded is crowding real
-// pull requests off the page.
-func Truncated(found []Found, q Query) bool {
-	limit := q.Limit
-	if limit <= 0 || limit > 100 {
-		limit = 100
-	}
-	return len(found) >= limit
+	return Page{
+		Found:   out,
+		Scanned: len(raw.Items),
+		// Counted before filtering: see Page. GitHub also reports
+		// incomplete_results when it timed out internally, which means the
+		// same thing to an operator -- pull requests exist that this search
+		// did not see.
+		Truncated: len(raw.Items) >= limit || raw.IncompleteResults,
+	}, nil
 }
 
 // ownerRepoFromAPIURL reads the pieces out of an api.github.com/repos/O/R URL,

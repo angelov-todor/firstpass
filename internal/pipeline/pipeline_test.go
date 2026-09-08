@@ -55,9 +55,10 @@ type fakePRs struct {
 	info map[string]ghpr.PRInfo
 	err  map[string]error
 
-	discovered      []ghpr.Found
-	discoverErr     error
-	discoverQueries []ghpr.Query
+	discovered        []ghpr.Found
+	discoverErr       error
+	discoverTruncated bool
+	discoverQueries   []ghpr.Query
 
 	// submitted records every verdict submission attempted through this fake,
 	// so a test that does not care about the argv can still prove nothing was
@@ -141,11 +142,13 @@ func (f *fakePRs) PRDiff(_ context.Context, ref prref.PRRef) (string, bool, erro
 // discovered is what this fake's sources offer, and discoverErr what they fail
 // with. Both nil is a pipeline with no sources configured, which is what every
 // test that predates them expects.
-func (f *fakePRs) Discover(_ context.Context, q ghpr.Query) ([]ghpr.Found, error) {
+func (f *fakePRs) Discover(_ context.Context, q ghpr.Query) (ghpr.Page, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.discoverQueries = append(f.discoverQueries, q)
-	return f.discovered, f.discoverErr
+	return ghpr.Page{
+		Found: f.discovered, Scanned: len(f.discovered), Truncated: f.discoverTruncated,
+	}, f.discoverErr
 }
 
 func (f *fakePRs) SubmitReview(_ context.Context, ref prref.PRRef, verdict, body string) error {

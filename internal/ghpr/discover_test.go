@@ -79,12 +79,13 @@ func TestDiscoverRefusesToSearchWithoutAReviewRequest(t *testing.T) {
 
 func TestDiscoverReadsTheResults(t *testing.T) {
 	c, _ := discoverFake(searchJSON)
-	found, err := c.Discover(context.Background(), Query{
+	page, err := c.Discover(context.Background(), Query{
 		Owner: "AstraBit-CPT", ReviewRequestedFor: "angelov-todor",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	found := page.Found
 	// Two of the three items: search/issues returns issues and pull requests
 	// together, and the third carries no pull_request key.
 	if len(found) != 2 {
@@ -111,15 +112,20 @@ func TestDiscoverReadsTheResults(t *testing.T) {
 
 func TestDiscoverKeepsOnlyTheRepositoriesAskedFor(t *testing.T) {
 	c, _ := discoverFake(searchJSON)
-	found, err := c.Discover(context.Background(), Query{
+	page, err := c.Discover(context.Background(), Query{
 		Owner: "AstraBit-CPT", ReviewRequestedFor: "angelov-todor",
 		RepoPrefixes: []string{"aex-trade"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(found) != 1 || found[0].Ref.Repo != "aex-trade-terminal" {
-		t.Fatalf("the prefix filter kept the wrong set: %+v", found)
+	if len(page.Found) != 1 || page.Found[0].Ref.Repo != "aex-trade-terminal" {
+		t.Fatalf("the prefix filter kept the wrong set: %+v", page.Found)
+	}
+	// Scanned counts what GitHub returned, not what survived the filter. It is
+	// what makes the truncation warning mean anything under a narrow prefix.
+	if page.Scanned != 3 {
+		t.Errorf("Scanned = %d, want every item GitHub returned", page.Scanned)
 	}
 
 	// No prefixes means every repository under the owner, which is the
@@ -130,8 +136,8 @@ func TestDiscoverKeepsOnlyTheRepositoriesAskedFor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 {
-		t.Errorf("no prefixes must mean no filtering, got %d", len(all))
+	if len(all.Found) != 2 {
+		t.Errorf("no prefixes must mean no filtering, got %d", len(all.Found))
 	}
 }
 
@@ -152,17 +158,46 @@ func TestDiscoverReportsFailure(t *testing.T) {
 	}
 }
 
-func TestTruncatedSaysWhenPullRequestsWereMissed(t *testing.T) {
-	q := Query{Limit: 2}
-	if Truncated(make([]Found, 1), q) {
-		t.Error("a short page saw everything")
+// TestTruncationIsCountedBeforeFiltering is the bug this had at first.
+//
+// The warning exists to tell the operator that bots are crowding real pull
+// requests off the page, and the configuration where that bites hardest is a
+// narrow repo_prefixes over a queue full of dependabot -- where the filtered
+// result is tiny precisely because the page was full of things it dropped.
+// Derived from the filtered count, the warning was silent exactly there.
+func TestTruncationIsCountedBeforeFiltering(t *testing.T) {
+	c, _ := discoverFake(searchJSON)
+	page, err := c.Discover(context.Background(), Query{
+		Owner: "AstraBit-CPT", ReviewRequestedFor: "angelov-todor",
+		// A prefix nothing matches, over a full page.
+		RepoPrefixes: []string{"nothing-matches-"},
+		Limit:        3,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !Truncated(make([]Found, 2), q) {
-		t.Error("a full page means some pull requests were not seen")
+	if len(page.Found) != 0 {
+		t.Fatalf("the prefix matches nothing, so nothing should survive: %+v", page.Found)
 	}
-	// The default is GitHub's maximum, not zero -- a zero limit meaning "no
-	// limit" must not make every result look truncated.
-	if Truncated(make([]Found, 5), Query{}) {
-		t.Error("an unset limit defaults to 100, so five results are not truncated")
+	if !page.Truncated {
+		t.Error("three items against a limit of three is a full page, whatever the filter kept")
+	}
+	if page.Scanned != 3 {
+		t.Errorf("Scanned = %d, want 3", page.Scanned)
+	}
+}
+
+// GitHub reporting incomplete_results means the same thing to an operator as a
+// full page: pull requests exist that this search did not see.
+func TestIncompleteResultsIsTruncation(t *testing.T) {
+	c, _ := discoverFake(`{"total_count":1,"incomplete_results":true,"items":[
+{"number":1,"repository_url":"https://api.github.com/repos/o/r","updated_at":"2026-09-07T08:30:00Z",
+ "user":{"login":"u","type":"User"},"pull_request":{}}]}`)
+	page, err := c.Discover(context.Background(), Query{Owner: "o", ReviewRequestedFor: "l"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Truncated {
+		t.Error("incomplete_results must be reported as truncation")
 	}
 }

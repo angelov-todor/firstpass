@@ -36,7 +36,7 @@ func (p *Pipeline) discover(ctx context.Context) []sourceFound {
 			Limit:              src.Limit,
 		}
 		dctx, cancel := context.WithTimeout(ctx, p.Cfg.GHTimeout.D())
-		found, err := p.PRs.Discover(dctx, q)
+		page, err := p.PRs.Discover(dctx, q)
 		cancel()
 		if err != nil {
 			p.Log.Warn("a source could not be read; the sweep continues without it",
@@ -48,14 +48,14 @@ func (p *Pipeline) discover(ctx context.Context) []sourceFound {
 		// from a page of results they never see. Without the exclusions this
 		// operator's own query returns 327 pull requests of which 314 are
 		// dependabot, so a full page is the expected symptom.
-		if ghpr.Truncated(found, q) {
+		if page.Truncated {
 			p.Log.Warn("a source returned a full page, so some pull requests were not seen; "+
 				"add the noisiest authors to exclude_authors",
-				"owner", src.Owner, "returned", len(found))
+				"owner", src.Owner, "scanned", page.Scanned, "kept", len(page.Found))
 		}
 
 		kept := 0
-		for _, f := range found {
+		for _, f := range page.Found {
 			if src.ExcludeBots && f.IsBot {
 				continue
 			}
@@ -69,7 +69,7 @@ func (p *Pipeline) discover(ctx context.Context) []sourceFound {
 			kept++
 		}
 		p.Log.Info("source offered pull requests", "owner", src.Owner,
-			"found", len(found), "kept", kept)
+			"scanned", page.Scanned, "matched", len(page.Found), "kept", kept)
 	}
 	return out
 }
