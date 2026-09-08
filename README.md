@@ -500,6 +500,14 @@ gate — the prompt is deliberately generous and the gate is exact. Without the
 prompt, discovery would spend one GitHub call per pull request per sweep for no
 new information, and firstpass shares that rate limit with the reviews.
 
+GitHub sometimes answers with `incomplete_results` — its search giving up part
+way. Against this organisation, three identical calls returned 6, 8 and 9 of a
+reported 9, with the flag set every time, so it is not transient and no
+configuration change clears it. It is reported and not treated as a failure:
+discovery re-runs every sweep, so a pull request one partial search missed is
+offered by the next. A **full page** is the different case and is actionable —
+exclude the noisiest authors.
+
 `firstpass doctor` runs each source's query for real and prints what came
 back — scanned, matched, and how many survived the bot filter. A source that
 returns nothing otherwise looks exactly like a quiet week: a typo in the login,
