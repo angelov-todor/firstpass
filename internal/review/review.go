@@ -583,6 +583,22 @@ func (rr *Runner) Run(ctx context.Context, dir string, ref prref.PRRef, previous
 		runErr = fmt.Errorf("claude for %s exit %d: %s",
 			ref.Key(), res.ExitCode, strings.TrimSpace(string(res.Stderr)))
 	}
+	// An account with no capacity left is not a failed review, and the caller
+	// needs to be able to tell the difference: every other claude failure is
+	// terminal and never retried, which for this would strand a pull request
+	// over a condition that fixes itself.
+	//
+	// Wrapped rather than replaced, so errors.As finds it and everything that
+	// reads the message still sees the underlying exit and stderr.
+	//
+	// Checked only when the run actually failed. A successful review whose
+	// diff happens to contain "you've hit your limit" -- an error message in
+	// somebody's code, a test fixture -- must not be mistaken for one.
+	if runErr != nil {
+		if phrase := UsageLimitPhrase(res.Stdout, res.Stderr); phrase != "" {
+			runErr = &UsageLimitError{Err: runErr, Matched: phrase}
+		}
+	}
 
 	if !rr.dryRun {
 		// A live run's findings live on the pull request, so there is normally
