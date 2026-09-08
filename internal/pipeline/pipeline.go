@@ -265,6 +265,47 @@ func (p *Pipeline) siblingStatus(ref prref.PRRef) string {
 	}
 }
 
+// usageLimitIsSafeToRetry reports whether a review stopped by a usage limit
+// can be deferred and run again, or whether it must be recorded
+// needs_attention like any other unfinished review.
+//
+// The question is only ever "did anything already land on the pull request".
+// A limit reached before the reviewer posted anything is free to retry. One
+// reached after it had begun posting is not: deferring would put a second copy
+// of those comments on a colleague's pull request, which is the damage
+// needs_attention exists to warn about.
+//
+// A dry run is always safe, because it posts nothing by construction.
+//
+// Anything unverifiable is treated as unsafe. That is the conservative
+// direction: an unnecessary needs_attention costs the operator one `firstpass
+// replay`, while a wrong deferral costs a colleague a duplicated comment set
+// and costs firstpass their trust.
+func (p *Pipeline) usageLimitIsSafeToRetry(ctx context.Context, ref prref.PRRef,
+	before ghpr.Feedback, gate verdictGate) (bool, string) {
+
+	if p.Cfg.DryRun {
+		return true, ""
+	}
+	if !gate.feedbackUsable {
+		return false, "the feedback list this would be checked against was incomplete, so " +
+			"whether anything was already posted cannot be established"
+	}
+	// The same count the posting check uses: how many items on this pull
+	// request the operator had authored before the review, against how many
+	// now.
+	posted, known := p.postedSince(ctx, ref, ownFeedbackCount(before, p.Cfg.GithubLogin))
+	if !known {
+		return false, "GitHub did not answer, so whether anything was already posted cannot " +
+			"be established"
+	}
+	if posted {
+		return false, "the reviewer had already posted on this pull request before the limit " +
+			"stopped it, so re-reviewing would duplicate those comments"
+	}
+	return true, ""
+}
+
 // ownFeedbackCount counts the items on a pull request authored by the
 // operator. It is the baseline for "did this review post anything".
 func ownFeedbackCount(f ghpr.Feedback, login string) int {
@@ -292,15 +333,35 @@ func ownFeedbackCount(f ghpr.Feedback, login string) int {
 // assertion firstpass cannot support is worse than a hedge, so the hedge is
 // what an unverifiable answer produces.
 func (p *Pipeline) findingsReachedThePR(ctx context.Context, ref prref.PRRef, before int) bool {
+	posted, known := p.postedSince(ctx, ref, before)
+	if !known {
+		p.Log.Warn("could not confirm the review's findings reached the pull request; "+
+			"the verdict body will not claim they did", "key", ref.Key())
+		return false
+	}
+	return posted
+}
+
+// postedSince reports whether the operator has more items on the pull request
+// than the given baseline, and whether the answer is known at all.
+//
+// The second return exists because "no" and "don't know" are not the same
+// answer and the two callers need opposite defaults from them. Deciding
+// whether to claim in a verdict body that the findings are posted, an
+// unanswered question means don't claim it. Deciding whether a review stopped
+// by a usage limit can safely run again, it means don't retry -- the very
+// possibility being guarded against is that comments are already there.
+// Collapsing both into a bare false, as this once did, quietly gave the second
+// caller the risky branch.
+func (p *Pipeline) postedSince(ctx context.Context, ref prref.PRRef, before int) (posted, known bool) {
 	fctx, cancel := context.WithTimeout(ctx, p.Cfg.GHTimeout.D())
 	defer cancel()
 	after, err := p.PRs.FetchFeedback(fctx, ref)
 	if err != nil {
-		p.Log.Warn("could not confirm the review's findings reached the pull request; "+
-			"the verdict body will not claim they did", "key", ref.Key(), "err", err)
-		return false
+		p.Log.Warn("could not read the pull request's feedback", "key", ref.Key(), "err", err)
+		return false, false
 	}
-	return ownFeedbackCount(after, p.Cfg.GithubLogin) > before
+	return ownFeedbackCount(after, p.Cfg.GithubLogin) > before, true
 }
 
 // toPriorFeedback converts what GitHub reported into what the reviewer is
@@ -1129,6 +1190,16 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 		return dec(ActionDefer, "paused")
 	}
 
+	// Once the account is out of capacity, every remaining candidate in this
+	// sweep would fail the same way -- and each would spend an Inspect, a
+	// clone and a claude start to find out. Parked without counting an
+	// attempt, for the same reason a pause is: it is not this pull request's
+	// fault and it will resolve on its own.
+	if st.limited() {
+		note(p.hold(c, "claude usage limit reached", opts))
+		return dec(ActionDefer, "claude usage limit reached")
+	}
+
 	// A replay is exempt: the operator named this PR, so a stale backlog entry
 	// must not retire it out from under them.
 	if !opts.replay {
@@ -1445,6 +1516,41 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 	// not be. An unverifiable answer must produce the hedge, not the claim.
 	if !p.Cfg.DryRun && rerr == nil && res.Verdict == review.VerdictFindings && gate.feedbackUsable {
 		gate.findingsPosted = p.findingsReachedThePR(ctx, ref, ownFeedbackCount(fb, p.Cfg.GithubLogin))
+	}
+
+	// An account out of capacity is not a failure of this pull request, so it
+	// must not be recorded as one. Every other claude failure becomes
+	// needs_attention -- terminal, never retried, warning that comments may be
+	// half posted -- and for this the outcome is the opposite on every count:
+	// nothing was posted, it will succeed unchanged once the limit resets, and
+	// it applies to every pull request equally.
+	//
+	// The one thing that makes it unsafe to retry is a limit reached *after*
+	// the reviewer had begun posting, which would put a second copy of those
+	// comments on somebody's pull request. So the deferral is conditional on
+	// having established that nothing landed; see usageLimitIsSafeToRetry.
+	var limitErr *review.UsageLimitError
+	if errors.As(rerr, &limitErr) {
+		safe, why := p.usageLimitIsSafeToRetry(ctx, ref, fb, gate)
+		if safe {
+			p.Log.Warn("the Claude account is out of capacity; deferring this pull request and "+
+				"the rest of this sweep rather than recording a failure", "key", ref.Key(),
+				"matched", limitErr.Matched)
+			// Latched for the sweep: every remaining candidate would fail the
+			// same way, and each costs a clone and a claude start to learn it.
+			st.limitReached()
+			// hold, not deferAttempt. This is the opposite case to the feedback
+			// fetch: that failure can be specific to one pull request and must
+			// eventually give up, while this one is account-wide and time-based.
+			// Counting attempts would spend the whole twenty-attempt budget of
+			// every parked pull request inside about ninety minutes of being
+			// rate-limited, retiring a backlog over a condition that resolves
+			// itself.
+			note(p.hold(c, "claude usage limit reached", opts))
+			return dec(ActionDefer, "claude usage limit reached")
+		}
+		p.Log.Warn("the Claude account is out of capacity, but this review cannot be safely "+
+			"retried", "key", ref.Key(), "why", why)
 	}
 
 	if rerr != nil {

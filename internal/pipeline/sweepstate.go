@@ -31,6 +31,14 @@ type sweepState struct {
 	reviewed       int
 	recordFailed   bool
 	pausedMidSweep bool
+	// limitHit latches "the Claude account has no capacity left" for the rest
+	// of this sweep.
+	//
+	// Account-wide and time-based, so every remaining candidate would fail
+	// identically -- and each would spend a clone and a claude start to
+	// discover it. Latched rather than re-tested because there is nothing to
+	// re-test: the answer cannot improve within one sweep.
+	limitHit bool
 
 	// diffs caches sibling diffs for the life of one sweep; see siblingDiff.
 	diffs map[string]cachedDiff
@@ -176,4 +184,17 @@ func (s *sweepState) siblingDiff(ctx context.Context, ref prref.PRRef,
 	s.diffs[key] = cachedDiff{diff: diff, truncated: truncated, err: err}
 	s.mu.Unlock()
 	return diff, truncated, err
+}
+
+// limitReached latches the Claude account being out of capacity.
+func (s *sweepState) limitReached() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.limitHit = true
+}
+
+func (s *sweepState) limited() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.limitHit
 }

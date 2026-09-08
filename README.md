@@ -239,6 +239,48 @@ has never reviewed is a first pass and says nothing. Unlike a re-post, a
 replay that ends in a skip does record its own fresh decision: the operator
 asked what firstpass makes of the PR now, and that is the answer.
 
+### Running out of Claude capacity
+
+One claude failure is not `needs_attention`: the account having no capacity
+left. It posted nothing, it will succeed unchanged once the limit resets, and
+it says nothing about the pull request, so recording the outcome that means
+"a human has to look at this" strands work that would have reviewed itself.
+Before this existed, an account that ran out mid-sweep left up to three pull
+requests per sweep needing a hand-typed `firstpass replay`; the only defence
+was to notice and run `firstpass pause`, which worked and should not have been
+necessary.
+
+Such a review is **deferred without counting an attempt**, deliberately unlike
+the feedback-fetch deferral next to it. Attempts exist to retire a pull request
+that fails on its own account; a usage limit is account-wide and time-based, so
+counting them would retire the entire backlog inside about ninety minutes of
+being rate-limited — the pull requests would be discarded for the one reason
+that has nothing to do with them.
+
+The rest of the sweep stops too. The limit applies to every candidate equally,
+and each one would otherwise spend an Inspect, a clone and a claude start to
+discover the same thing, so the first one to hit it latches for the sweep and
+the remainder are parked untouched. Exactly what a mid-sweep pause does.
+
+Two things keep this from being simply "defer on a usage limit". It is
+recognised only from a **failed** run, so a successful review whose diff quotes
+the phrase — an error string in somebody's code, a test fixture — is not
+mistaken for one. And it is deferred only once firstpass has established that
+**nothing was posted**: a limit reached after the reviewer began commenting
+cannot be retried, because re-reviewing would put a second copy of those
+comments on a colleague's pull request, which is the damage `needs_attention`
+exists to warn about. A dry run posts nothing by construction and needs no
+check. Anything unverifiable stays `needs_attention`.
+
+The phrases are taken from the shipped claude binary rather than invented, and
+the list is grounded but not authoritative — `USAGE_LIMIT_ERROR_PREFIXES` is
+minified beyond reading in the bundle. The design accounts for that: an
+unmatched failure keeps the old behaviour exactly, so a missed phrase costs a
+`needs_attention` record — today's outcome — and never anything worse. "Rate
+limit" on its own is deliberately not matched; the CLI uses that phrase about
+GitHub throttling and bash tool concurrency, and deferring on either would park
+a pull request that no amount of waiting fixes.
+
 ## Chat reactions
 
 Live only, a message that carried a PR link is reacted to:
