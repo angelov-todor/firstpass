@@ -228,3 +228,49 @@ func TestAnOrdinaryClaudeFailureIsStillNeedsAttention(t *testing.T) {
 		t.Errorf("an unrecognised failure must stay needs_attention: %+v", d)
 	}
 }
+
+// TestAUsageLimitGitHubCannotAnswerAboutIsNotDeferred covers the case my own
+// first version of this got backwards.
+//
+// The posting check was reused from the verdict body, where a GitHub error
+// means "do not claim the findings are posted" and returning false is the
+// cautious answer. Asked instead whether a review may safely run again, that
+// same false means "nothing was posted, go ahead" -- so an unanswered question
+// took the risky branch and could duplicate a colleague's comment set, which
+// is the one outcome this guard exists to prevent. "No" and "don't know" are
+// different answers and the two callers need opposite defaults from them.
+func TestAUsageLimitGitHubCannotAnswerAboutIsNotDeferred(t *testing.T) {
+	h := newHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-balances", 12))})
+	h.seedWatermark(t)
+
+	const prJSON = `{"state":"OPEN","isDraft":false,"author":{"login":"colleague"},"headRefOid":"sha1"}`
+	gh := &runner.Fake{Replies: []runner.Reply{
+		{Match: "pr view", Result: runner.Result{Stdout: []byte(prJSON)}},
+		{Match: "pr review", Result: runner.Result{}},
+		// The pre-review fetch succeeds. The check afterwards does not: no
+		// further reply is configured, so the fake errors, exactly as GitHub
+		// being unreachable for that one call would.
+		{Match: "graphql", Result: runner.Result{Stdout: []byte(emptyFeedbackJSON)}, Times: 1},
+	}}
+	h.p.PRs = ghpr.New(gh, "gh")
+
+	claude := &runner.Fake{Replies: []runner.Reply{
+		{Match: "Review pull request", Result: runner.Result{
+			ExitCode: 1, Stderr: []byte("You've hit your limit"),
+		}},
+	}}
+	h.p.Rev = review.New(claude, "claude", nil, false, t.TempDir())
+	h.cfg.DryRun = false
+	h.apply()
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := decisionFor(rep, verdictKey); d.Action != ActionNeedsAttention {
+		t.Errorf("an unverifiable posting state must not be deferred: %+v", d)
+	}
+	if rec := reviewRecord(t, h); rec.Outcome != store.OutcomeNeedsAttention {
+		t.Errorf("Outcome = %q, want needs_attention", rec.Outcome)
+	}
+}

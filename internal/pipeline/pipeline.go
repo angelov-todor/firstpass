@@ -294,7 +294,12 @@ func (p *Pipeline) usageLimitIsSafeToRetry(ctx context.Context, ref prref.PRRef,
 	// The same count the posting check uses: how many items on this pull
 	// request the operator had authored before the review, against how many
 	// now.
-	if p.findingsReachedThePR(ctx, ref, ownFeedbackCount(before, p.Cfg.GithubLogin)) {
+	posted, known := p.postedSince(ctx, ref, ownFeedbackCount(before, p.Cfg.GithubLogin))
+	if !known {
+		return false, "GitHub did not answer, so whether anything was already posted cannot " +
+			"be established"
+	}
+	if posted {
 		return false, "the reviewer had already posted on this pull request before the limit " +
 			"stopped it, so re-reviewing would duplicate those comments"
 	}
@@ -328,15 +333,35 @@ func ownFeedbackCount(f ghpr.Feedback, login string) int {
 // assertion firstpass cannot support is worse than a hedge, so the hedge is
 // what an unverifiable answer produces.
 func (p *Pipeline) findingsReachedThePR(ctx context.Context, ref prref.PRRef, before int) bool {
+	posted, known := p.postedSince(ctx, ref, before)
+	if !known {
+		p.Log.Warn("could not confirm the review's findings reached the pull request; "+
+			"the verdict body will not claim they did", "key", ref.Key())
+		return false
+	}
+	return posted
+}
+
+// postedSince reports whether the operator has more items on the pull request
+// than the given baseline, and whether the answer is known at all.
+//
+// The second return exists because "no" and "don't know" are not the same
+// answer and the two callers need opposite defaults from them. Deciding
+// whether to claim in a verdict body that the findings are posted, an
+// unanswered question means don't claim it. Deciding whether a review stopped
+// by a usage limit can safely run again, it means don't retry -- the very
+// possibility being guarded against is that comments are already there.
+// Collapsing both into a bare false, as this once did, quietly gave the second
+// caller the risky branch.
+func (p *Pipeline) postedSince(ctx context.Context, ref prref.PRRef, before int) (posted, known bool) {
 	fctx, cancel := context.WithTimeout(ctx, p.Cfg.GHTimeout.D())
 	defer cancel()
 	after, err := p.PRs.FetchFeedback(fctx, ref)
 	if err != nil {
-		p.Log.Warn("could not confirm the review's findings reached the pull request; "+
-			"the verdict body will not claim they did", "key", ref.Key(), "err", err)
-		return false
+		p.Log.Warn("could not read the pull request's feedback", "key", ref.Key(), "err", err)
+		return false, false
 	}
-	return ownFeedbackCount(after, p.Cfg.GithubLogin) > before
+	return ownFeedbackCount(after, p.Cfg.GithubLogin) > before, true
 }
 
 // toPriorFeedback converts what GitHub reported into what the reviewer is
@@ -1506,7 +1531,8 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 	// having established that nothing landed; see usageLimitIsSafeToRetry.
 	var limitErr *review.UsageLimitError
 	if errors.As(rerr, &limitErr) {
-		if safe, why := p.usageLimitIsSafeToRetry(ctx, ref, fb, gate); safe {
+		safe, why := p.usageLimitIsSafeToRetry(ctx, ref, fb, gate)
+		if safe {
 			p.Log.Warn("the Claude account is out of capacity; deferring this pull request and "+
 				"the rest of this sweep rather than recording a failure", "key", ref.Key(),
 				"matched", limitErr.Matched)
@@ -1522,10 +1548,9 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 			// itself.
 			note(p.hold(c, "claude usage limit reached", opts))
 			return dec(ActionDefer, "claude usage limit reached")
-		} else {
-			p.Log.Warn("the Claude account is out of capacity, but this review cannot be safely "+
-				"retried", "key", ref.Key(), "why", why)
 		}
+		p.Log.Warn("the Claude account is out of capacity, but this review cannot be safely "+
+			"retried", "key", ref.Key(), "why", why)
 	}
 
 	if rerr != nil {
