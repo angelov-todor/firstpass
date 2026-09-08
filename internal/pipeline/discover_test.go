@@ -283,3 +283,30 @@ func TestASourceQueriesWhatItWasConfiguredWith(t *testing.T) {
 		t.Errorf("ReviewRequestedFor = %q, want the operator's login", q.ReviewRequestedFor)
 	}
 }
+
+// A chat source is declared in the config so the file names every place
+// firstpass looks. It is not searched: Sweep has already fetched its messages,
+// with the watermark, the reactions and the sibling grouping that go with
+// them. Searching for it would be a second, wrong way to read the same space.
+func TestAChatSourceIsNotSearched(t *testing.T) {
+	h := newHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-balances", 12))})
+	h.seedWatermark(t)
+	h.prs.info[verdictKey] = ghpr.PRInfo{State: "OPEN", Author: "colleague", HeadSHA: "sha1"}
+	h.cfg.Sources = []config.Source{
+		{Type: config.SourceChat, Space: "spaces/A"},
+		aSource(),
+	}
+	h.apply()
+
+	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	h.prs.mu.Lock()
+	defer h.prs.mu.Unlock()
+	if len(h.prs.discoverQueries) != 1 {
+		t.Fatalf("only the github source has a query to run, got %d", len(h.prs.discoverQueries))
+	}
+	if h.prs.discoverQueries[0].Owner != "Example-Org" {
+		t.Errorf("the wrong source was searched: %+v", h.prs.discoverQueries[0])
+	}
+}

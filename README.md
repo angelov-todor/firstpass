@@ -433,11 +433,14 @@ is stopped.
 
 ## Sources
 
-firstpass watches the chat space. A **source** is an extra place it looks —
-today, pull requests with a review requested from you on GitHub.
+A **source** is a place firstpass looks for pull requests. Both kinds are
+written in the config, so the file names every source rather than naming one
+and implying the other.
 
 ```yaml
 sources:
+  - type: chat
+    space: "spaces/AAQA7zIDu54"
   - type: github
     owner: AstraBit-CPT
     repo_prefixes: [aex-]
@@ -445,11 +448,23 @@ sources:
     exclude_bots: true
 ```
 
-The chat space is not listed there and is not optional. It is where the team
-asks for reviews, and it carries the two things a search cannot: which pull
-requests were posted together, and a message to react to. A source is an
-addition to it, so a GitHub outage or a rate limit costs firstpass the
-discovered pull requests for one sweep and never the posted ones.
+What the config cannot do is switch the chat space off. A config with no chat
+space at all is **refused**, not quietly run without one — deleting that entry
+is a mistake nobody would notice in a log, so it is an error instead. The space
+may be declared on the chat source or left in the top-level `space` key, and an
+installation that predates sources has only the latter and keeps working
+untouched. Two chat sources are refused as well: everything downstream reads a
+single space, so a config naming two would silently watch whichever was written
+last.
+
+The chat source is declared but not searched — `Sweep` has already fetched its
+messages, with the watermark, the reactions and the sibling grouping that go
+with them.
+
+The chat space carries the two things a search cannot: which pull requests were
+posted together, and a message to react to. A GitHub source is an addition to
+it, so a GitHub outage or a rate limit costs firstpass the discovered pull
+requests for one sweep and never the posted ones.
 
 **A source finds pull requests with a review requested from you, and there is
 deliberately no mode that finds everything.** Measured against a real

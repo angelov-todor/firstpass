@@ -143,6 +143,11 @@ func cmdDoctor(args []string) error {
 		// source on a calm day are the same silence in the log. This runs the
 		// real query and says what came back.
 		for i, src := range cfg.Sources {
+			// A chat source has no query to run; the chat check below covers
+			// it, and has since before sources existed.
+			if src.Type != config.SourceGitHub {
+				continue
+			}
 			prs := ghpr.New(r, cfg.Paths.GH)
 			var detail string
 			derr := bounded(func(ctx context.Context) error {
@@ -150,7 +155,7 @@ func cmdDoctor(args []string) error {
 				detail, err = checkSource(ctx, prs, src, cfg.GithubLogin)
 				return err
 			})
-			add(fmt.Sprintf("source %d works", i+1), derr, detail)
+			add(fmt.Sprintf("source %d (%s) works", i+1, src.Type), derr, detail)
 		}
 
 		ch := chat.New(r, cfg.Paths.Python, cfg.Paths.ChatScript, cfg.Space)

@@ -150,12 +150,18 @@ deny_repos: []
 # deny_repos:
 #   - your-org/some-repo
 
-# Extra places to look for pull requests, beyond the chat space.
+# Every place firstpass looks for pull requests.
 #
-# The chat space is not one of these and is not optional: it is where the team
-# asks for reviews, and it carries the two things no search can — which pull
-# requests were posted together, and a message to react to. A source is an
-# addition to it.
+# Both kinds are written here, so this file names every source rather than
+# naming one and implying the other. What it cannot do is switch the chat space
+# off: a config with no chat space at all is refused, not quietly run without
+# one. The space may be declared on the chat source or left in the top-level
+# `space` key above, and an installation that predates sources has only the
+# latter and keeps working untouched.
+#
+# The chat space is where the team asks for reviews, and it carries the two
+# things no search can — which pull requests were posted together, and a
+# message to react to. A GitHub source is an addition to it.
 #
 # A source finds pull requests with a review requested from you and nothing
 # else. There is deliberately no "every open PR" mode: on one real organisation
@@ -172,9 +178,11 @@ deny_repos: []
 # one page — bots dominate a review-requested queue, 314 of 327 on the
 # organisation this was measured against. exclude_bots is the second net, for
 # the bot nobody has added to that list yet.
-# Default: [] (no sources; chat only)
+# Default: [] (the top-level `space` above, and nothing else)
 sources: []
 # sources:
+#   - type: chat
+#     space: "spaces/XXXXXXXXXXX"
 #   - type: github
 #     owner: your-org
 #     # Defaults to github_login.
