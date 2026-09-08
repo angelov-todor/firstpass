@@ -99,12 +99,28 @@ type Config struct {
 	Sources []Source `yaml:"sources"`
 }
 
-// Source is one additional place to find pull requests.
+// The source types firstpass understands.
+const (
+	SourceChat   = "chat"
+	SourceGitHub = "github"
+)
+
+// Source is one place firstpass looks for pull requests.
+//
+// Both kinds are written here, so the config file names every source rather
+// than one of them. What it cannot do is switch the chat space off: a config
+// with no chat source at all is refused, not quietly run without one. The
+// space may be declared on a chat source or left in the top-level `space`
+// key, and an installation that predates sources has only the latter and
+// keeps working untouched.
 type Source struct {
-	// Type is "github" and nothing else so far. Named rather than implied so
-	// a second kind can be added without changing what is already written in
-	// people's config files.
+	// Type is "chat" or "github". Named rather than implied so a third kind
+	// can be added without changing what is already written in people's
+	// config files.
 	Type string `yaml:"type"`
+	// Space is the Google Chat space a chat source watches. Empty means the
+	// top-level `space`.
+	Space string `yaml:"space"`
 	// Owner is the organisation to search.
 	Owner string `yaml:"owner"`
 	// ReviewRequested restricts the search to pull requests with a review
@@ -214,6 +230,13 @@ func Load(path string) (Config, error) {
 		// its default and Validate then reports whatever is actually required.
 		return c, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// A chat source's space is the space, so everything downstream can keep
+	// reading one field and know nothing about how it was written.
+	for _, src := range c.Sources {
+		if src.Type == SourceChat && src.Space != "" {
+			c.Space = src.Space
+		}
+	}
 	return c, nil
 }
 
@@ -263,9 +286,12 @@ func LoadLenient(path string) (Config, []string, error) {
 
 // Validate rejects configurations that would be unsafe or useless to run.
 func (c Config) Validate() error {
+	// Required however it is written. This is what stops a config from
+	// turning the chat space off by omission: deleting the chat source is an
+	// error rather than a quieter firstpass.
 	if c.Space == "" {
-		return errors.New("space is required: set \"space\" in your config file to the Google Chat " +
-			"space to watch (see config.yaml.example)")
+		return errors.New("a chat space is required: add a source of type \"chat\" with its " +
+			"\"space\", or set the top-level \"space\" key (see config.yaml.example)")
 	}
 	if c.GithubLogin == "" {
 		return errors.New("github_login is required: without it firstpass would review your own PRs; " +
@@ -303,10 +329,21 @@ func (c Config) Validate() error {
 	if c.FetchLimit <= 0 {
 		return errors.New("fetch_limit must be positive")
 	}
+	chats := 0
 	for i, src := range c.Sources {
 		if err := src.validate(i, c); err != nil {
 			return err
 		}
+		if src.Type == SourceChat {
+			chats++
+		}
+	}
+	// One chat space, not two. Two would be a config that looks like it
+	// watches both and silently watches whichever was written last, because
+	// everything downstream reads a single space.
+	if chats > 1 {
+		return fmt.Errorf("sources: %d chat sources, but firstpass watches one space; "+
+			"remove the extra ones", chats)
 	}
 	if c.ChatTimeout.D() <= 0 {
 		return errors.New("chat_timeout must be positive: chat.py would otherwise run unbounded")
@@ -393,8 +430,25 @@ func (s Source) Login(githubLogin string) string {
 }
 
 func (s Source) validate(i int, c Config) error {
-	if s.Type != "github" {
-		return fmt.Errorf("sources[%d]: unknown type %q (the only source type is \"github\")", i, s.Type)
+	switch s.Type {
+	case SourceChat:
+		// The github-only fields are rejected rather than ignored: on a chat
+		// source they are always a mistake, and the likeliest one is a
+		// mistyped type, where ignoring them would silently drop the GitHub
+		// source the operator thought they had written.
+		if s.Owner != "" || len(s.RepoPrefixes) > 0 || len(s.ExcludeAuthors) > 0 ||
+			s.ExcludeBots || s.Limit != 0 || s.ReviewRequested != "" {
+			return fmt.Errorf("sources[%d]: a chat source takes only \"space\"; the other "+
+				"settings belong to a source of type %q", i, SourceGitHub)
+		}
+		return nil
+	case SourceGitHub:
+		if s.Space != "" {
+			return fmt.Errorf("sources[%d]: \"space\" belongs to a source of type %q", i, SourceChat)
+		}
+	default:
+		return fmt.Errorf("sources[%d]: unknown type %q (the source types are %q and %q)",
+			i, s.Type, SourceChat, SourceGitHub)
 	}
 	if s.Owner == "" {
 		return fmt.Errorf("sources[%d]: owner is required", i)

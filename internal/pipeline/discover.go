@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/angelov-todor/firstpass/internal/config"
 	"github.com/angelov-todor/firstpass/internal/ghpr"
 	"github.com/angelov-todor/firstpass/internal/prref"
 	"github.com/angelov-todor/firstpass/internal/store"
@@ -28,6 +29,13 @@ func (p *Pipeline) discover(ctx context.Context) []sourceFound {
 	}
 	var out []sourceFound
 	for _, src := range p.Cfg.Sources {
+		// The chat source is declared alongside the others so the config file
+		// names every source, but it is not searched: Sweep has already
+		// fetched its messages, with a watermark, reactions and the sibling
+		// grouping that go with them.
+		if src.Type != config.SourceGitHub {
+			continue
+		}
 		q := ghpr.Query{
 			Owner:              src.Owner,
 			ReviewRequestedFor: src.Login(p.Cfg.GithubLogin),
