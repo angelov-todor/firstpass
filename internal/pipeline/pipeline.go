@@ -183,10 +183,13 @@ func verdictBodyWithheld(pass int, reason string) string {
 // Failures are skipped, not propagated. Context is an improvement to a review,
 // never a precondition for one: a sibling whose diff cannot be fetched -- a
 // deleted branch, a rate limit, a repository the token cannot read -- costs
-// this review some context and must not cost it the review. That is the
-// opposite of the feedback fetch, which gates the approval, and the difference
-// is that an approval makes a claim about the feedback while a review makes no
-// claim about its siblings.
+// this review some context and must not cost it the review.
+//
+// That is the opposite of the feedback fetch, which defers the whole review
+// when it fails. The difference is what each one supports: an approval claims
+// that everything already raised has been addressed, so a reviewer that never
+// saw what was raised cannot be asked for one, while nothing about a review
+// claims anything about its siblings.
 func (p *Pipeline) siblingContext(ctx context.Context, c candidate, st *sweepState) []review.Sibling {
 	var out []review.Sibling
 	for _, ref := range c.siblings {
@@ -1261,9 +1264,25 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 		// budget still in front of it.
 		p.Log.Warn("could not read the existing feedback on this pull request; deferring rather "+
 			"than reviewing without it", "key", ref.Key(), "err", ferr)
-		note(ferr)
-		note(p.hold(c, "feedback read failed", opts))
-		return dec(ActionDefer, "feedback read failed")
+		// deferAttempt, not hold: an attempt is counted, exactly as it is for a
+		// failed Inspect and a failed sibling fetch.
+		//
+		// hold looked kinder and is worse. A transient outage costs a handful
+		// of attempts out of twenty and the pull request is reviewed as soon as
+		// GitHub answers. A failure specific to one pull request -- a GraphQL
+		// timeout on the three-way fifty-node query for a change with hundreds
+		// of comments, while `gh pr view` still succeeds -- fails identically
+		// every five minutes. Uncounted, that is seven days of re-offering,
+		// some two thousand futile Inspect-and-fetch pairs, a review that never
+		// happens, and finally `expired` anyway. Counted, it gives up in about
+		// an hour and a half and says so.
+		//
+		// ferr is deliberately not passed to note(): that channel is for store
+		// writes failing, and it holds the whole batch's watermark with a log
+		// line about records that could not be written. A GitHub error is
+		// neither, and the pending park below is what guarantees the re-offer.
+		note(p.deferAttempt(c, "feedback read failed: "+ferr.Error(), opts))
+		return dec(ActionDefer, "feedback read failed: "+ferr.Error())
 	}
 	prior = toPriorFeedback(fb)
 	// Truncated, not failed: GitHub answered and said there is more than it

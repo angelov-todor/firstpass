@@ -173,25 +173,61 @@ func TestNoApprovalWhenTheFeedbackListIsIncomplete(t *testing.T) {
 // proof of posting. It was right on the pull request it happened to run on, by
 // luck.
 func TestATruncatedListAlsoWithholdsThePostingClaim(t *testing.T) {
-	truncated := strings.Replace(emptyFeedbackJSON,
-		`"comments":{"totalCount":0`, `"comments":{"totalCount":99`, 1)
-	h, f := gateHarness(t, review.VerdictFindings, runner.Result{Stdout: []byte(truncated)})
+	// The fixture has to make the guard load-bearing, and the first version of
+	// this test did not: with no feedback at all the baseline is zero whether
+	// the guard is there or not, so the hedge appeared either way and deleting
+	// `&& gate.feedbackUsable` left the test passing. It asserted a case
+	// adjacent to the property, which is a mistake this codebase has made
+	// enough times to have a name for.
+	//
+	// So: the pre-review list is truncated AND hides an item the operator had
+	// already authored. Without the guard the baseline reads as zero, the
+	// after-count reads as one, and firstpass concludes this review posted
+	// something -- stating as fact, on a colleague's pull request, that the
+	// findings are there.
+	truncatedHidingOwnComment := `{"data":{"repository":{"pullRequest":{` +
+		`"reviewDecision":"REVIEW_REQUIRED",` +
+		`"reviewThreads":{"totalCount":0,"nodes":[]},` +
+		`"reviews":{"totalCount":0,"nodes":[]},` +
+		// Ninety-nine comments exist; none are shown. One of the hidden ones is
+		// the operator's, from an earlier pass.
+		`"comments":{"totalCount":99,"nodes":[]}}}}}`
+
+	h := newHarness(t, []chat.Message{msg("spaces/A/messages/m1", prURL("aex-balances", 12))})
+	h.seedWatermark(t)
+	const prJSON = `{"state":"OPEN","isDraft":false,"author":{"login":"colleague"},"headRefOid":"sha1"}`
+	f := &runner.Fake{Replies: []runner.Reply{
+		{Match: "pr view", Result: runner.Result{Stdout: []byte(prJSON)}},
+		{Match: "pr review", Result: runner.Result{}},
+		{Match: "graphql", Result: runner.Result{Stdout: []byte(truncatedHidingOwnComment)}, Times: 1},
+		// After the review, the operator's older comment is visible. Nothing
+		// this review did put it there.
+		{Match: "graphql", Result: runner.Result{Stdout: []byte(ownCommentFeedbackJSON)}},
+	}}
+	h.p.PRs = ghpr.New(f, "gh")
+	h.rev.result = review.Result{Verdict: review.VerdictFindings}
+	h.cfg.DryRun = false
+	h.apply()
 
 	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
 		t.Fatal(err)
 	}
 	body := strings.Join(ghReviewCalls(f)[0].Args, " ")
 	if strings.Contains(body, "Findings are posted in a comment on this pull request") {
-		t.Errorf("posting must not be claimed from an untrustworthy baseline:\n%s", body)
+		t.Errorf("posting must not be claimed from a baseline truncation hid:\n%s", body)
 	}
 	if !strings.Contains(body, "could not confirm they") {
 		t.Errorf("the body must hedge instead:\n%s", body)
 	}
 }
 
-// The gates only ever hold back an approval. A findings verdict is already the
-// cautious answer, and gating it would turn a fetch failure into silence on a
-// pull request that has real findings to report.
+// The gates only ever hold back an approval, never a findings verdict: that is
+// already the cautious answer, and gating it would turn an incomplete feedback
+// list into silence on a pull request with real findings to report.
+//
+// A feedback list that cannot be read at all is a different case and defers
+// the whole review; see TestAFailedFeedbackFetchDefersInsteadOfReviewing. This
+// is the truncated one, where GitHub answered.
 func TestTheGatesDoNotTouchAFindingsVerdict(t *testing.T) {
 	h, f := gateHarness(t, review.VerdictFindings, feedbackWith("CHANGES_REQUESTED"))
 

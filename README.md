@@ -110,6 +110,10 @@ One sweep, on a ticker or on demand:
      findings were posted either, because a truncated list undercounts the
      baseline that claim is measured against.
 
+   Either case records `approval withheld` in `status` and posts a comment
+   review saying the review found nothing to change and why it is not
+   approving anyway.
+
    If the feedback **cannot be read at all**, the PR is **deferred** rather
    than reviewed: the fetch happens before the clone, so it costs nothing, and
    the PR is offered again on the next sweep. This was learned in production. A
@@ -119,10 +123,6 @@ One sweep, on a ticker or on demand:
    own limitation, with nothing that would ever try again. Retrying just the
    gate after the review would not fix it: a reviewer that was never shown what
    was raised cannot support the claim that it has all been addressed.
-
-   Either case records `approval withheld` in `status` and posts a comment
-   review saying the review found nothing to change and why it is not
-   approving anyway.
 8. Live, the chat message that carried the link gets a reaction, so the team
    can see the PR has been picked up and, later, how it came out.
 
