@@ -13,6 +13,7 @@ import (
 
 	"github.com/angelov-todor/firstpass/internal/chat"
 	"github.com/angelov-todor/firstpass/internal/config"
+	"github.com/angelov-todor/firstpass/internal/ghpr"
 	"github.com/angelov-todor/firstpass/internal/runner"
 )
 
@@ -132,6 +133,25 @@ func cmdDoctor(args []string) error {
 			return err
 		})
 		add("gh can submit reviews", serr, scopeDetail)
+
+		// One check per configured source, and only when configured: a source
+		// is optional and an install without one is not broken.
+		//
+		// Worth a check because a source that returns nothing looks exactly
+		// like a quiet week -- a typo in the login, an owner with no review
+		// requests, a repo_prefixes that matches no repository, and a working
+		// source on a calm day are the same silence in the log. This runs the
+		// real query and says what came back.
+		for i, src := range cfg.Sources {
+			prs := ghpr.New(r, cfg.Paths.GH)
+			var detail string
+			derr := bounded(func(ctx context.Context) error {
+				var err error
+				detail, err = checkSource(ctx, prs, src, cfg.GithubLogin)
+				return err
+			})
+			add(fmt.Sprintf("source %d works", i+1), derr, detail)
+		}
 
 		ch := chat.New(r, cfg.Paths.Python, cfg.Paths.ChatScript, cfg.Space)
 		var named bool
@@ -308,4 +328,44 @@ func ghAuth(ctx context.Context, r runner.Runner, gh string) error {
 		return fmt.Errorf("gh auth status exit %d: run `gh auth login`", res.ExitCode)
 	}
 	return nil
+}
+
+// checkSource runs a source's real query and reports what came back.
+//
+// Split out of cmdDoctor to be testable, and worth checking at all because a
+// source that returns nothing looks exactly like a quiet week: a typo in the
+// login, an owner with no review requests, a repo_prefixes matching no
+// repository, and a working source on a calm day are the same silence.
+//
+// The detail is returned alongside the error rather than only on success,
+// because the truncation case is both -- a failure the operator must act on,
+// and a count they need to see to act on it.
+func checkSource(ctx context.Context, prs *ghpr.Client, src config.Source, login string) (string, error) {
+	page, err := prs.Discover(ctx, ghpr.Query{
+		Owner:              src.Owner,
+		ReviewRequestedFor: src.Login(login),
+		RepoPrefixes:       src.RepoPrefixes,
+		ExcludeAuthors:     src.ExcludeAuthors,
+		Limit:              src.Limit,
+	})
+	if err != nil {
+		return "", err
+	}
+	kept := 0
+	for _, f := range page.Found {
+		if src.ExcludeBots && f.IsBot {
+			continue
+		}
+		kept++
+	}
+	detail := fmt.Sprintf("%s: %d scanned, %d matched, %d after bots",
+		src.Owner, page.Scanned, len(page.Found), kept)
+	// A full page is reported as a failure, because it is the one outcome the
+	// operator has to act on: pull requests exist that firstpass will never
+	// see until the noisiest authors are excluded.
+	if page.Truncated {
+		return detail, fmt.Errorf("%s: a full page (%d scanned), so some pull requests were "+
+			"not seen -- add the noisiest authors to exclude_authors", src.Owner, page.Scanned)
+	}
+	return detail, nil
 }

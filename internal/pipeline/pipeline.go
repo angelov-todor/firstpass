@@ -48,6 +48,10 @@ type (
 		// firstpass's: recorded in the store, visible in status, and
 		// exercised by these tests without a subprocess.
 		SubmitReview(ctx context.Context, ref prref.PRRef, verdict, body string) error
+		// Discover lists pull requests a configured source offers. One
+		// request per source per sweep; see ghpr.Discover for why it is not
+		// paged.
+		Discover(ctx context.Context, q ghpr.Query) (ghpr.Page, error)
 	}
 	Worktrees interface {
 		Prepare(ctx context.Context, ref prref.PRRef) (dir string, cleanup func(), err error)
@@ -663,6 +667,18 @@ type candidate struct {
 	// or a backfill offers messages older than the review they triggered. Zero
 	// for a candidate with no chat message behind it.
 	triggerAt time.Time
+	// activityAt is when the source that offered this candidate last saw the
+	// pull request change. Set only by a GitHub source, where it stands in for
+	// the chat re-post as the cheap "worth looking at again" filter.
+	//
+	// A prompt, never a decision: a comment moves it exactly as a push does.
+	// What decides whether a second review happens is the head SHA, after
+	// Inspect, and that is the same for every source -- one review per commit,
+	// however the pull request was found.
+	activityAt time.Time
+	// fromChat records that a chat message put this candidate here, which is
+	// what the second-pass prompt and the reactions both key off.
+	fromChat bool
 	// siblings are the other pull requests named in the same chat message,
 	// in the order they appeared, excluding this one.
 	//
@@ -768,7 +784,7 @@ func (p *Pipeline) Sweep(ctx context.Context, opts Options) (SweepReport, error)
 	// itself carried.
 	p.recordMessages(msgs, opts)
 
-	cands := p.candidates(msgs)
+	cands := p.candidates(msgs, p.discover(ctx))
 	p.progress(Event{Stage: StageCandidates, Total: len(cands)})
 
 	st := newSweepState(p.Cfg.MaxReviewsPerSweep)
@@ -1016,7 +1032,7 @@ func others(refs []prref.PRRef, skip int) []prref.PRRef {
 // candidates lists the refs to consider: everything in the new messages,
 // walked oldest-first so the earliest post is recorded as the trigger, followed
 // by refs still parked in the pending bucket.
-func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
+func (p *Pipeline) candidates(msgs []chat.Message, found []sourceFound) []candidate {
 	var out []candidate
 	seen := map[string]bool{}
 
@@ -1029,6 +1045,7 @@ func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
 			seen[ref.Key()] = true
 			out = append(out, candidate{
 				ref: ref, trigger: msgs[i].Name, triggerAt: msgs[i].CreateTime,
+				fromChat: true,
 				// Every other ref this message carried, whether or not it was
 				// already claimed by a newer message. The siblings describe
 				// what the post said, not what this sweep happens to be
@@ -1037,6 +1054,20 @@ func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
 				siblings: others(refs, j),
 			})
 		}
+	}
+
+	// Sources are consulted after chat and before the backlog. Order is the
+	// whole of the "one review, whichever channel found it" rule at this
+	// level: a pull request already claimed by a chat message keeps that
+	// message, and with it the sibling group and something to react to, which
+	// a search result cannot supply. The rule proper is the head SHA gate
+	// further down, which is source-blind by construction.
+	for _, f := range found {
+		if seen[f.ref.Key()] {
+			continue
+		}
+		seen[f.ref.Key()] = true
+		out = append(out, candidate{ref: f.ref, activityAt: f.updatedAt})
 	}
 
 	pend, err := p.Store.AllPending()
@@ -1060,6 +1091,11 @@ func (p *Pipeline) candidates(msgs []chat.Message) []candidate {
 		// used to produce for every ref.
 		out = append(out, candidate{
 			ref: ref, trigger: pd.TriggerMessage, triggerAt: pd.TriggerTime,
+			// A parked row remembers the post that asked for it, so it keeps
+			// the chat provenance with it: otherwise a second pass deferred by
+			// a transient failure would come back looking like a candidate no
+			// message ever asked for.
+			fromChat: pd.TriggerMessage != "",
 		})
 	}
 	return out
@@ -1156,7 +1192,12 @@ func (p *Pipeline) handle(ctx context.Context, c candidate, rep *SweepReport, st
 				// decided" here would read as a PR that was dealt with cleanly.
 				return dec(ActionNeedsAttention, inFlightReason)
 			}
-			if !secondPassDue(prev, c.trigger, c.triggerAt) {
+			// Two prompts, one rule. A chat candidate qualifies on a newer
+			// post, a discovered one on activity since the last decision, and
+			// neither of them is permission to review: both fall through to
+			// the head SHA gate below Inspect, which reviews a commit once and
+			// does not care which source found it.
+			if !p.secondPassPrompted(prev, c) {
 				return dec(ActionSkip, "already decided: "+string(prev.Outcome))
 			}
 			// Conditions 1 and 2 hold: a reviewed record, re-posted by a

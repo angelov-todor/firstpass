@@ -28,6 +28,23 @@ type PRRef struct {
 // Key is the stable identity used for de-duplication and storage.
 func (r PRRef) Key() string { return fmt.Sprintf("%s/%s#%d", r.Owner, r.Repo, r.Number) }
 
+// New is the only way a PRRef should be built from strings that came from
+// outside: it folds owner and repo the way Key and ParseKey assume they are
+// folded.
+//
+// It exists because a ref assembled by hand skipped that folding and produced
+// a second key for a pull request firstpass already had one for -- GitHub
+// answers "AstraBit-CPT" where a chat link says "astrabit-cpt" -- which reads
+// through as a pull request reviewed twice, once under each spelling, and as a
+// stored record its own next sweep cannot find.
+func New(owner, repo string, number int) PRRef {
+	return PRRef{
+		Owner:  strings.ToLower(owner),
+		Repo:   strings.ToLower(repo),
+		Number: number,
+	}
+}
+
 // URL is the canonical web URL for the pull request.
 func (r PRRef) URL() string {
 	return fmt.Sprintf("https://github.com/%s/%s/pull/%d", r.Owner, r.Repo, r.Number)
@@ -59,7 +76,7 @@ func Extract(text string) []PRRef {
 		if err != nil || n <= 0 {
 			return
 		}
-		ref := PRRef{Owner: strings.ToLower(owner), Repo: strings.ToLower(repo), Number: n}
+		ref := New(owner, repo, n)
 		if seen[ref.Key()] {
 			return
 		}

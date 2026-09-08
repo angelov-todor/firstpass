@@ -150,6 +150,42 @@ deny_repos: []
 # deny_repos:
 #   - your-org/some-repo
 
+# Extra places to look for pull requests, beyond the chat space.
+#
+# The chat space is not one of these and is not optional: it is where the team
+# asks for reviews, and it carries the two things no search can — which pull
+# requests were posted together, and a message to react to. A source is an
+# addition to it.
+#
+# A source finds pull requests with a review requested from you and nothing
+# else. There is deliberately no "every open PR" mode: on one real organisation
+# that is over five hundred pull requests, each costing a clone and a claude
+# run, and each one a comment on a colleague's PR nobody asked for. A review
+# request is the same property the chat space provides — somebody asked.
+#
+# One review per pull request per commit, whichever source found it. A PR
+# posted in chat and returned by a search is reviewed once; a PR already
+# reviewed at its current head is not reviewed again until there is a
+# follow-up commit.
+#
+# exclude_authors goes into the query itself and is what keeps the result to
+# one page — bots dominate a review-requested queue, 314 of 327 on the
+# organisation this was measured against. exclude_bots is the second net, for
+# the bot nobody has added to that list yet.
+# Default: [] (no sources; chat only)
+sources: []
+# sources:
+#   - type: github
+#     owner: your-org
+#     # Defaults to github_login.
+#     review_requested: your-login
+#     # Empty means every repo under the owner.
+#     repo_prefixes: [aex-]
+#     exclude_authors: [app/dependabot]
+#     exclude_bots: true
+#     # Up to GitHub's maximum of 100, which is also the default.
+#     limit: 50
+
 # Arguments passed to `claude -p` for every review. The shipped default,
 # --permission-mode bypassPermissions, is required for a headless review to
 # run `gh` and post comments at all — under the default permission mode
