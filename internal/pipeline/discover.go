@@ -43,6 +43,50 @@ func (p *Pipeline) discover(ctx context.Context) []sourceFound {
 			ExcludeAuthors:     src.ExcludeAuthors,
 			Limit:              src.Limit,
 		}
+		// The cold start, and the reason it is checked before the search
+		// rather than after: a source switched on for the first time has no
+		// business reviewing what was already open. Those pull requests are
+		// its history -- eight on the organisation this runs against, half of
+		// them months old -- and firstpass would post on all of them within a
+		// quarter of an hour of being started.
+		//
+		// Exactly the rule the chat side has always had for a first run
+		// against a populated space, applied to a source. What comes after
+		// the moment firstpass started watching is offered; what was already
+		// there is not.
+		id := src.ID(p.Cfg.GithubLogin)
+		since, watched, serr := p.Store.SourceSince(id)
+		if serr != nil {
+			p.Log.Error("could not read when this source was first watched; skipping it "+
+				"rather than risking its whole backlog", "owner", src.Owner, "err", serr)
+			continue
+		}
+		if !watched && !src.ReviewBacklog {
+			// Recorded before anything is offered, so a crash between here and
+			// the next sweep cannot turn the cold start into a backlog sweep.
+			now := p.now()
+			if werr := p.Store.SetSourceSince(id, now); werr != nil {
+				p.Log.Error("could not record when this source was first watched; skipping it "+
+					"rather than risking its whole backlog", "owner", src.Owner, "err", werr)
+				continue
+			}
+			p.Log.Info("new source: the pull requests already open are its history and will "+
+				"not be reviewed; anything touched from now on will be",
+				"owner", src.Owner, "since", now.Format(time.RFC3339))
+			continue
+		}
+		if !watched {
+			// review_backlog: the operator asked for the history on purpose.
+			// Still recorded, so it happens once rather than every sweep.
+			if werr := p.Store.SetSourceSince(id, p.now()); werr != nil {
+				p.Log.Warn("could not record when this source was first watched",
+					"owner", src.Owner, "err", werr)
+			}
+			p.Log.Warn("new source with review_backlog set: every open pull request it finds "+
+				"will be reviewed, however old", "owner", src.Owner)
+			since = time.Time{}
+		}
+
 		dctx, cancel := context.WithTimeout(ctx, p.Cfg.GHTimeout.D())
 		page, err := p.PRs.Discover(dctx, q)
 		cancel()
@@ -78,6 +122,17 @@ func (p *Pipeline) discover(ctx context.Context) []sourceFound {
 			// so a misconfigured source is visible as an empty result rather
 			// than as a sweep full of refusals.
 			if !p.Cfg.OwnerAllowed(f.Ref.Owner) || p.Cfg.RepoDenied(f.Ref.Owner, f.Ref.Repo) {
+				continue
+			}
+			// Untouched since firstpass started watching this source, so it is
+			// part of the history the cold start excluded. A pull request
+			// somebody pushes to, comments on, or requests a review on lands
+			// after that moment and is offered.
+			//
+			// A missing timestamp is treated as old rather than new. GitHub
+			// always sends one, so an absent one means something unexpected,
+			// and the safe reading of "unknown age" is not "review it".
+			if !since.IsZero() && !f.UpdatedAt.After(since) {
 				continue
 			}
 			out = append(out, sourceFound{ref: f.Ref, updatedAt: f.UpdatedAt})

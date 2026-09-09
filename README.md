@@ -396,6 +396,9 @@ configured Google Chat account can actually see named spaces).
   already been here. Flags: `-live`, `-quiet`.
 - `clear <pr-url | owner/repo#n>` — mark a `needs_attention` or `in_flight`
   record handled, once a human has dealt with it. Flag: `-note text`.
+- `catchup` — skip to now: move the chat watermark to the newest message
+  without reviewing the gap. Prints the pull requests it is skipping first.
+  Flag: `-print-only`.
 - `doctor` — preflight every external dependency, and run each configured
   source's real query, reporting what came back. A full page is reported as a
   failure: it means pull requests exist that firstpass will never see.
@@ -479,6 +482,30 @@ on the organisation this was built against — so without the exclusion the real
 pull requests are crowded off the page. `exclude_bots` is the second net, for
 the bot nobody has added to that list yet, and firstpass warns when a page
 comes back full.
+
+### Starting without reviewing history
+
+A source's first sweep reviews **nothing**. The pull requests already open at
+that moment are its history — eight when this was switched on here, half of
+them months old — and without the guard, starting the daemon would post a
+review on every one of them inside a quarter of an hour. The moment is recorded
+and only what is touched afterwards is offered: a push, a comment, a new review
+request. `review_backlog: true` on the source switches this off, for somebody
+who genuinely wants an existing backlog reviewed once.
+
+This is the rule the chat side has always had — a first run against a populated
+space reviews nothing — applied to sources. A source is identified by its owner
+and login rather than its position in the list, so reordering the entries or
+adding one above an existing source does not read as a new source and
+cold-start one that has been running for weeks.
+
+The chat equivalent for an existing installation is `firstpass catchup`, which
+moves the watermark to the newest message without reviewing what came before
+it. Use it when firstpass has been off for a while and that window has already
+been dealt with by hand. It prints the pull requests it is about to skip, with
+how many were already decided, before it moves anything — they will not be
+reviewed unless somebody posts them again or you `replay` them — and
+`-print-only` shows the same list while leaving the watermark alone.
 
 ### One review per commit, whichever source found it
 

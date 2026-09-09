@@ -41,14 +41,28 @@ func sourceHarness(t *testing.T, msgs []chat.Message, offered ...ghpr.Found) *ha
 	h.prs.discovered = offered
 	h.cfg.Sources = []config.Source{aSource()}
 	h.apply()
+	// A source firstpass has been watching for a while, so these tests are
+	// about what it offers rather than about the cold start. The cold start
+	// has its own tests below; without this every one of these would assert
+	// against a first sweep, which deliberately offers nothing.
+	seedWatched(t, h, aSource(), time.Now().Add(-24*time.Hour))
 	return h
+}
+
+// seedWatched records that firstpass started watching a source at the given
+// time, which is what a second and later sweep sees.
+func seedWatched(t *testing.T, h *harness, src config.Source, since time.Time) {
+	t.Helper()
+	if err := h.st.SetSourceSince(src.ID(h.cfg.GithubLogin), since); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestADiscoveredPullRequestIsReviewed is the feature: a pull request with a
 // review requested from the operator gets reviewed even though nobody posted
 // it in chat.
 func TestADiscoveredPullRequestIsReviewed(t *testing.T) {
-	h := sourceHarness(t, nil, found("aex-balances", 12, time.Time{}))
+	h := sourceHarness(t, nil, found("aex-balances", 12, time.Now()))
 	h.prs.info[verdictKey] = ghpr.PRInfo{State: "OPEN", Author: "colleague", HeadSHA: "sha1"}
 
 	rep, err := h.p.Sweep(context.Background(), Options{})
@@ -207,7 +221,7 @@ func TestASourceFailureDoesNotStopTheSweep(t *testing.T) {
 // were dependabot. A bot that nobody has added to the query's exclusions must
 // still not reach a review.
 func TestBotsAreNotReviewed(t *testing.T) {
-	bot := found("aex-balances", 12, time.Time{})
+	bot := found("aex-balances", 12, time.Now())
 	bot.IsBot = true
 	bot.Author = "dependabot[bot]"
 	h := sourceHarness(t, nil, bot)
@@ -230,7 +244,7 @@ func TestBotsAreNotReviewed(t *testing.T) {
 // discovery so a misconfigured source reads as an empty result rather than as
 // a sweep full of refusals.
 func TestADiscoveredPullRequestOutsideTheAllowlistIsDropped(t *testing.T) {
-	outside := ghpr.Found{Ref: prref.New("Someone-Else", "aex-x", 1)}
+	outside := ghpr.Found{Ref: prref.New("Someone-Else", "aex-x", 1), UpdatedAt: time.Now()}
 	h := sourceHarness(t, nil, outside)
 
 	rep, err := h.p.Sweep(context.Background(), Options{})
@@ -297,6 +311,7 @@ func TestAChatSourceIsNotSearched(t *testing.T) {
 		aSource(),
 	}
 	h.apply()
+	seedWatched(t, h, aSource(), time.Now().Add(-24*time.Hour))
 
 	if _, err := h.p.Sweep(context.Background(), Options{}); err != nil {
 		t.Fatal(err)
@@ -308,5 +323,123 @@ func TestAChatSourceIsNotSearched(t *testing.T) {
 	}
 	if h.prs.discoverQueries[0].Owner != "Example-Org" {
 		t.Errorf("the wrong source was searched: %+v", h.prs.discoverQueries[0])
+	}
+}
+
+// TestANewSourceReviewsNoneOfItsHistory is the rule for switching a source on.
+//
+// The pull requests already open at that moment are the source's history:
+// eight on the organisation this runs against, half of them months old. Left
+// unguarded, starting the daemon would post a review on every one of them
+// inside a quarter of an hour -- which is exactly the mistake the chat side has
+// guarded against since the beginning, where a first run on a populated space
+// reviews nothing.
+func TestANewSourceReviewsNoneOfItsHistory(t *testing.T) {
+	h := newHarness(t, nil)
+	h.seedWatermark(t)
+	// Two months old and yesterday: both are history, because history is what
+	// was already open, not what is old.
+	h.prs.discovered = []ghpr.Found{
+		found("aex-balances", 12, time.Now().Add(-60*24*time.Hour)),
+		found("aex-venue-service", 29, time.Now().Add(-24*time.Hour)),
+	}
+	h.cfg.Sources = []config.Source{aSource()}
+	h.apply()
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Decisions) != 0 {
+		t.Errorf("a source's first sweep must offer nothing, got %+v", rep.Decisions)
+	}
+	if len(h.rev.ran) != 0 {
+		t.Errorf("claude ran %d times on a new source's history", len(h.rev.ran))
+	}
+	// Recorded, so it is a cold start once rather than every sweep.
+	if _, watched, err := h.st.SourceSince(aSource().ID(h.cfg.GithubLogin)); err != nil {
+		t.Fatal(err)
+	} else if !watched {
+		t.Error("the moment firstpass started watching must be recorded on the first sweep")
+	}
+}
+
+// And what happens after that moment is reviewed. A pull request pushed to,
+// commented on, or newly review-requested lands after the cold start and is
+// offered like any other.
+func TestASourceReviewsWhatHappensAfterItStartsWatching(t *testing.T) {
+	h := newHarness(t, nil)
+	h.seedWatermark(t)
+	started := time.Now().Add(-time.Hour)
+	h.cfg.Sources = []config.Source{aSource()}
+	h.apply()
+	seedWatched(t, h, aSource(), started)
+
+	h.prs.discovered = []ghpr.Found{
+		// Touched since firstpass started watching.
+		found("aex-balances", 12, started.Add(time.Minute)),
+		// Untouched since: still history.
+		found("aex-venue-service", 29, started.Add(-24*time.Hour)),
+	}
+	h.prs.info[verdictKey] = ghpr.PRInfo{State: "OPEN", Author: "colleague", HeadSHA: "sha1"}
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := decisionFor(rep, verdictKey); !ok || d.Action != ActionReview {
+		t.Errorf("a pull request touched since the cold start must be reviewed: %+v", d)
+	}
+	if _, ok := decisionFor(rep, "example-org/aex-venue-service#29"); ok {
+		t.Error("a pull request untouched since the cold start is still history")
+	}
+}
+
+// review_backlog is the escape hatch: somebody who genuinely wants the
+// existing backlog reviewed can ask for it, once.
+func TestReviewBacklogOffersTheHistoryOnPurpose(t *testing.T) {
+	h := newHarness(t, nil)
+	h.seedWatermark(t)
+	src := aSource()
+	src.ReviewBacklog = true
+	h.cfg.Sources = []config.Source{src}
+	h.apply()
+	h.prs.discovered = []ghpr.Found{found("aex-balances", 12, time.Now().Add(-60*24*time.Hour))}
+	h.prs.info[verdictKey] = ghpr.PRInfo{State: "OPEN", Author: "colleague", HeadSHA: "sha1"}
+
+	rep, err := h.p.Sweep(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := decisionFor(rep, verdictKey); !ok || d.Action != ActionReview {
+		t.Errorf("review_backlog must offer the history: %+v", d)
+	}
+	// Recorded even so, so the next sweep is an ordinary one rather than a
+	// second backlog sweep.
+	if _, watched, _ := h.st.SourceSince(src.ID(h.cfg.GithubLogin)); !watched {
+		t.Error("the moment must be recorded even when the backlog was wanted")
+	}
+}
+
+// A source's identity survives config edits. Keyed by position in the list,
+// adding an entry above an existing source would read as a new source and
+// cold-start one that had been running for weeks -- silently skipping whatever
+// it was about to review.
+func TestASourceKeepsItsIdentityWhenTheListIsReordered(t *testing.T) {
+	a := config.Source{Type: config.SourceGitHub, Owner: "Example-Org"}
+	b := config.Source{Type: config.SourceGitHub, Owner: "Example-Org", RepoPrefixes: []string{"aex-"}}
+	if a.ID("me") != b.ID("me") {
+		t.Errorf("a filter change must not make it a different source: %q vs %q",
+			a.ID("me"), b.ID("me"))
+	}
+	c := config.Source{Type: config.SourceGitHub, Owner: "Other-Org"}
+	if a.ID("me") == c.ID("me") {
+		t.Error("a different owner is a different source")
+	}
+	// Case-folded, because a config written "example-org" one day and
+	// "Example-Org" the next is the same source.
+	d := config.Source{Type: config.SourceGitHub, Owner: "example-org"}
+	if a.ID("me") != d.ID("me") {
+		t.Error("the owner's case must not change a source's identity")
 	}
 }
