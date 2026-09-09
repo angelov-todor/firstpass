@@ -342,6 +342,15 @@ var (
 	keyWatermark   = []byte("watermark")
 )
 
+// keySourceSince is the prefix for one timestamp per configured source: the
+// moment firstpass started watching it.
+//
+// In the meta bucket rather than a bucket of its own, because it is one small
+// value per source and the meta bucket already exists in every database on
+// disk -- a new bucket would need the same CreateBucketIfNotExists care Open
+// takes for the messages one.
+func keySourceSince(id string) []byte { return []byte("source_since:" + id) }
+
 // Store is a bbolt-backed record of past decisions.
 type Store struct{ db *bolt.DB }
 
@@ -392,6 +401,25 @@ func (s *Store) Watermark() (Watermark, bool, error) {
 }
 
 func (s *Store) SetWatermark(w Watermark) error { return s.put(bucketMeta, keyWatermark, w) }
+
+// SourceSince is when firstpass started watching a source, and whether it ever
+// has.
+//
+// Absent means this source has never been swept, which is the cold start: the
+// pull requests already open when a source is switched on are its history, and
+// history is not what firstpass is for. The chat side has had this rule since
+// the beginning -- a first run against a populated space reviews nothing -- and
+// a source without it would spend launch day reviewing every open review
+// request, some of them months old, and posting on all of them.
+func (s *Store) SourceSince(id string) (time.Time, bool, error) {
+	var t time.Time
+	ok, err := s.get(bucketMeta, keySourceSince(id), &t)
+	return t, ok, err
+}
+
+func (s *Store) SetSourceSince(id string, t time.Time) error {
+	return s.put(bucketMeta, keySourceSince(id), t)
+}
 
 func (s *Store) Review(key string) (Review, bool, error) {
 	var r Review

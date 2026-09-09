@@ -193,6 +193,11 @@ sources: []
 #     exclude_bots: true
 #     # Up to GitHub's maximum of 100, which is also the default.
 #     limit: 50
+#     # Review everything the source finds on its first sweep, however old.
+#     # Off by default: the pull requests already open when a source is
+#     # switched on are its history, and firstpass would post on all of them
+#     # within minutes of being started.
+#     review_backlog: false
 
 # Arguments passed to `claude -p` for every review. The shipped default,
 # --permission-mode bypassPermissions, is required for a headless review to

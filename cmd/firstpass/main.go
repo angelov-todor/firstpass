@@ -17,6 +17,7 @@ commands:
   status    what has been reviewed, skipped or deferred
   replay    review one PR again, ignoring the dedupe record
   clear     mark one PR's needs_attention record handled
+  catchup   skip to now: move the chat watermark without reviewing the gap
   doctor    check every external dependency
   pause     stop reviewing and posting; sweeps keep queueing
   resume    undo pause
@@ -54,6 +55,8 @@ func main() {
 		err = cmdReplay(args)
 	case "clear":
 		err = cmdClear(args)
+	case "catchup":
+		err = cmdCatchup(args)
 	case "doctor":
 		err = cmdDoctor(args)
 	case "pause":

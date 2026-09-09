@@ -146,6 +146,15 @@ type Source struct {
 	ExcludeBots bool `yaml:"exclude_bots"`
 	// Limit caps the page, up to GitHub's hundred.
 	Limit int `yaml:"limit"`
+	// ReviewBacklog switches off the cold start, so the first sweep offers
+	// every pull request the source finds however old it is.
+	//
+	// Off by default, because the pull requests already open when a source is
+	// switched on are its history: on this organisation that is eight, four of
+	// them months old, and firstpass would post on all of them within a
+	// quarter of an hour of being started. On is for deliberately clearing a
+	// backlog, which is a thing somebody might want once.
+	ReviewBacklog bool `yaml:"review_backlog"`
 }
 
 // Default is the shipped configuration: safe, but not yet usable. Space,
@@ -437,7 +446,7 @@ func (s Source) validate(i int, c Config) error {
 		// mistyped type, where ignoring them would silently drop the GitHub
 		// source the operator thought they had written.
 		if s.Owner != "" || len(s.RepoPrefixes) > 0 || len(s.ExcludeAuthors) > 0 ||
-			s.ExcludeBots || s.Limit != 0 || s.ReviewRequested != "" {
+			s.ExcludeBots || s.Limit != 0 || s.ReviewRequested != "" || s.ReviewBacklog {
 			return fmt.Errorf("sources[%d]: a chat source takes only \"space\"; the other "+
 				"settings belong to a source of type %q", i, SourceGitHub)
 		}
@@ -471,4 +480,15 @@ func (s Source) validate(i int, c Config) error {
 			"maximum of 100)", i)
 	}
 	return nil
+}
+
+// ID identifies a source across restarts and config edits, so what firstpass
+// remembers about it survives both.
+//
+// Owner and login, not the position in the list: reordering the entries or
+// adding one above must not read as a new source, which would cold-start a
+// source that has been running for weeks and silently skip whatever it had
+// been about to review.
+func (s Source) ID(githubLogin string) string {
+	return s.Type + ":" + strings.ToLower(s.Owner) + ":" + strings.ToLower(s.Login(githubLogin))
 }
